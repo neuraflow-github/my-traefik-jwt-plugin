@@ -439,7 +439,7 @@ func (jwtPlugin *JwtPlugin) FetchKeys() {
 func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Request) {
 	if st, err := jwtPlugin.CheckToken(request, rw); err != nil {
 		rw.Header().Set("Content-Type", "application/json")
-		
+
 		var errorResponse *ErrorResponse
 		if e, ok := err.(*ErrorResponse); ok {
 			errorResponse = e
@@ -450,13 +450,13 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 				Details: err.Error(),
 			}
 		}
-		
+
 		jsonBytes, jerr := json.Marshal(errorResponse)
 		if jerr != nil {
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		
+
 		if st >= 300 && st < 600 {
 			rw.WriteHeader(st)
 		} else {
@@ -772,7 +772,7 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, rw http.
 
 	if !allow {
 		forbiddenErr := newErrorResponse(ErrorTypeUnauthenticatedOpaForbidden, nil)
-		
+
 		if jwtPlugin.opaHttpStatusField != "" {
 			if rawVal, rawValOk := result.Result[jwtPlugin.opaHttpStatusField]; rawValOk {
 				if st, err := strconv.Atoi(strings.Trim(string(rawVal), `"`)); err == nil {
