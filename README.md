@@ -1,5 +1,7 @@
 # my-traefik-jwt-plugin ![Build](https://github.com/neuraflow-github/my-traefik-jwt-plugin/actions/workflows/build.yaml/badge.svg)
 
+- GitHub trigger: 100
+
 Traefik plugin for verifying JSON Web Tokens (JWT). Supports public keys, certificates or JWKS endpoints.
 Supports RSA, ECDSA and symmetric keys. Supports Open Policy Agent (OPA) for additional authorization checks.
 
