@@ -29,15 +29,15 @@ import (
 
 // Error type constants
 const (
-	ErrorTypeUnauthenticatedJwtMissing = "UNAUTHENTICATED_JWT_MISSING"
-	ErrorTypeUnauthenticatedJwtFormatInvalid = "UNAUTHENTICATED_JWT_FORMAT_INVALID"
+	ErrorTypeUnauthenticatedJwtMissing          = "UNAUTHENTICATED_JWT_MISSING"
+	ErrorTypeUnauthenticatedJwtFormatInvalid    = "UNAUTHENTICATED_JWT_FORMAT_INVALID"
 	ErrorTypeUnauthenticatedJwtExpired          = "UNAUTHENTICATED_JWT_EXPIRED"
 	ErrorTypeUnauthenticatedJwtNotYetValid      = "UNAUTHENTICATED_JWT_NOT_YET_VALID"
 	ErrorTypeUnauthenticatedJwtSignatureInvalid = "UNAUTHENTICATED_JWT_SIGNATURE_INVALID"
 	ErrorTypeUnauthenticatedJwtFieldMissing     = "UNAUTHENTICATED_JWT_FIELD_MISSING"
 	ErrorTypeUnauthenticatedJwtAlgorithmInvalid = "UNAUTHENTICATED_JWT_ALGORITHM_INVALID"
-	ErrorTypeUnauthenticatedOpaResponseInvalid   = "UNAUTHENTICATED_OPA_RESPONSE_INVALID"
-	ErrorTypeUnauthenticatedOpaForbidden         = "UNAUTHENTICATED_OPA_FORBIDDEN"
+	ErrorTypeUnauthenticatedOpaResponseInvalid  = "UNAUTHENTICATED_OPA_RESPONSE_INVALID"
+	ErrorTypeUnauthenticatedOpaForbidden        = "UNAUTHENTICATED_OPA_FORBIDDEN"
 )
 
 // ErrorResponse represents a structured API error
