@@ -1,9 +1,9 @@
-displayName: JWT And OPA Access Management
+displayName: JWT And OPA Access Management (Custom error messages)
 type: middleware
 
-import: github.com/traefik-plugins/traefik-jwt-plugin
+import: github.com/neuraflow-github/my-traefik-jwt-plugin
 
-summary: Checks JWT tokens for required fields. Supports Open Policy Agent (OPA) and signature validation with JWKS.
+summary: Checks JWT tokens for required fields. Supports Open Policy Agent (OPA) and signature validation with JWKS. This is traefiks plugin but with custom error messages.
 
 iconPath: jwt.png
 
