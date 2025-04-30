@@ -27,6 +27,37 @@ import (
 	"time"
 )
 
+// Error type constants
+const (
+	ErrorTypeUnauthenticatedJwtMissing = "UNAUTHENTICATED_JWT_MISSING"
+	ErrorTypeUnauthenticatedJwtFormatInvalid = "UNAUTHENTICATED_JWT_FORMAT_INVALID"
+	ErrorTypeUnauthenticatedJwtExpired          = "UNAUTHENTICATED_JWT_EXPIRED"
+	ErrorTypeUnauthenticatedJwtNotYetValid      = "UNAUTHENTICATED_JWT_NOT_YET_VALID"
+	ErrorTypeUnauthenticatedJwtSignatureInvalid = "UNAUTHENTICATED_JWT_SIGNATURE_INVALID"
+	ErrorTypeUnauthenticatedJwtFieldMissing     = "UNAUTHENTICATED_JWT_FIELD_MISSING"
+	ErrorTypeUnauthenticatedJwtAlgorithmInvalid = "UNAUTHENTICATED_JWT_ALGORITHM_INVALID"
+	ErrorTypeUnauthenticatedOpaResponseInvalid   = "UNAUTHENTICATED_OPA_RESPONSE_INVALID"
+	ErrorTypeUnauthenticatedOpaForbidden         = "UNAUTHENTICATED_OPA_FORBIDDEN"
+)
+
+// ErrorResponse represents a structured API error
+type ErrorResponse struct {
+	Type          string      `json:"type"`
+	Details       interface{} `json:"details"`
+	CustomMessage interface{} `json:"custom_message"`
+}
+
+// Error implements the error interface
+func (e *ErrorResponse) Error() string {
+	if e.CustomMessage != nil {
+		return fmt.Sprint(e.CustomMessage)
+	}
+	if e.Details != nil {
+		return fmt.Sprint(e.Details)
+	}
+	return e.Type
+}
+
 // map of cancel  functions for background refresh. whe a new configuration is loaded, the old background refresh with the same name is cancelled
 var backgroundRefreshCancel map[string]context.CancelFunc = make(map[string]context.CancelFunc)
 
@@ -407,11 +438,31 @@ func (jwtPlugin *JwtPlugin) FetchKeys() {
 
 func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Request) {
 	if st, err := jwtPlugin.CheckToken(request, rw); err != nil {
-		if st >= 300 && st < 600 {
-			http.Error(rw, err.Error(), st)
+		rw.Header().Set("Content-Type", "application/json")
+		
+		var errorResponse *ErrorResponse
+		if e, ok := err.(*ErrorResponse); ok {
+			errorResponse = e
 		} else {
-			http.Error(rw, err.Error(), http.StatusForbidden)
+			// Convert regular errors to structured format
+			errorResponse = &ErrorResponse{
+				Type:    "UNAUTHENTICATED_GENERIC",
+				Details: err.Error(),
+			}
 		}
+		
+		jsonBytes, jerr := json.Marshal(errorResponse)
+		if jerr != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		if st >= 300 && st < 600 {
+			rw.WriteHeader(st)
+		} else {
+			rw.WriteHeader(http.StatusForbidden)
+		}
+		rw.Write(jsonBytes)
 		return
 	}
 	jwtPlugin.next.ServeHTTP(rw, request)
@@ -452,7 +503,7 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 					withUrl(request.URL.String()).
 					withNetwork(jwtPlugin.remoteAddr(request)).
 					print()
-				return 0, fmt.Errorf("payload missing required field %s", fieldName)
+				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtFieldMissing, nil)
 			}
 			if fieldName == "exp" {
 				if expInt, err := strconv.ParseInt(fmt.Sprint(jwtToken.Payload["exp"]), 10, 64); err != nil || expInt < time.Now().Unix() {
@@ -461,7 +512,7 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 						withUrl(request.URL.String()).
 						withNetwork(jwtPlugin.remoteAddr(request)).
 						print()
-					return 0, fmt.Errorf("token is expired")
+					return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtExpired, nil)
 				}
 			} else if fieldName == "nbf" {
 				if nbfInt, err := strconv.ParseInt(fmt.Sprint(jwtToken.Payload["nbf"]), 10, 64); err != nil || nbfInt > time.Now().Add(1*time.Minute).Unix() {
@@ -470,7 +521,7 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 						withUrl(request.URL.String()).
 						withNetwork(jwtPlugin.remoteAddr(request)).
 						print()
-					return 0, fmt.Errorf("token not valid yet")
+					return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtNotYetValid, nil)
 				}
 			}
 		}
@@ -524,7 +575,7 @@ func (jwtPlugin *JwtPlugin) ExtractToken(request *http.Request) (*JWT, error) {
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtMissing, nil)
 	}
 
 	parts := strings.Split(jwtTokenStr, ".")
@@ -533,19 +584,19 @@ func (jwtPlugin *JwtPlugin) ExtractToken(request *http.Request) (*JWT, error) {
 			withUrl(request.URL.String()).
 			withNetwork(jwtPlugin.remoteAddr(request)).
 			print()
-		return nil, fmt.Errorf("invalid token format")
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtFormatInvalid, nil)
 	}
 	header, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return nil, err
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtFormatInvalid, nil)
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return nil, err
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtFormatInvalid, nil)
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return nil, err
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtFormatInvalid, nil)
 	}
 	jwtToken := JWT{
 		Plaintext: []byte(jwtTokenStr[0 : len(parts[0])+len(parts[1])+1]),
@@ -553,13 +604,13 @@ func (jwtPlugin *JwtPlugin) ExtractToken(request *http.Request) (*JWT, error) {
 	}
 	err = json.Unmarshal(header, &jwtToken.Header)
 	if err != nil {
-		return nil, err
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtFormatInvalid, nil)
 	}
 	d := json.NewDecoder(bytes.NewBuffer(payload))
 	d.UseNumber()
 	err = d.Decode(&jwtToken.Payload)
 	if err != nil {
-		return nil, err
+		return nil, newErrorResponse(ErrorTypeUnauthenticatedJwtFormatInvalid, nil)
 	}
 	return &jwtToken, nil
 }
@@ -648,23 +699,27 @@ func (jwtPlugin *JwtPlugin) getKeysSync() map[string]interface{} {
 func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
 	for _, h := range jwtToken.Header.Crit {
 		if _, ok := supportedHeaderNames[h]; !ok {
-			return fmt.Errorf("unsupported header: %s", h)
+			return newErrorResponse(ErrorTypeUnauthenticatedJwtAlgorithmInvalid, nil)
 		}
 	}
 	// Look up the algorithm
 	a, ok := tokenAlgorithms[jwtToken.Header.Alg]
 	if !ok {
-		return fmt.Errorf("unknown JWS algorithm: %s", jwtToken.Header.Alg)
+		return newErrorResponse(ErrorTypeUnauthenticatedJwtAlgorithmInvalid, nil)
 	}
 	if jwtPlugin.alg != "" && jwtToken.Header.Alg != jwtPlugin.alg {
-		return fmt.Errorf("incorrect alg, expected %s got %s", jwtPlugin.alg, jwtToken.Header.Alg)
+		return newErrorResponse(ErrorTypeUnauthenticatedJwtAlgorithmInvalid, nil)
 	}
 	key, ok := jwtPlugin.getKeysSync()[jwtToken.Header.Kid]
 	if !ok && jwtPlugin.forceRefreshKeys() {
 		key, ok = jwtPlugin.getKeysSync()[jwtToken.Header.Kid]
 	}
 	if ok {
-		return a.verify(key, a.hash, jwtToken.Plaintext, jwtToken.Signature)
+		err := a.verify(key, a.hash, jwtToken.Plaintext, jwtToken.Signature)
+		if err != nil {
+			return newErrorResponse(ErrorTypeUnauthenticatedJwtSignatureInvalid, nil)
+		}
+		return nil
 	} else {
 		for _, key := range jwtPlugin.getKeysSync() {
 			err := a.verify(key, a.hash, jwtToken.Plaintext, jwtToken.Signature)
@@ -672,14 +727,14 @@ func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("token validation failed")
+		return newErrorResponse(ErrorTypeUnauthenticatedJwtSignatureInvalid, nil)
 	}
 }
 
 func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, rw http.ResponseWriter) (int, error) {
 	opaPayload, err := toOPAPayload(request, jwtPlugin.opaBody)
 	if err != nil {
-		return 0, err
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 	if token != nil {
 		opaPayload.Input.JWTHeader = token.Header
@@ -687,58 +742,45 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, rw http.
 	}
 	authPayloadAsJSON, err := json.Marshal(opaPayload)
 	if err != nil {
-		return 0, err
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 	authResponse, err := http.Post(jwtPlugin.opaUrl, "application/json", bytes.NewBuffer(authPayloadAsJSON))
 	if err != nil {
-		return 0, err
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 	body, err := io.ReadAll(authResponse.Body)
 	if err != nil {
-		return 0, err
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 	var result Response
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		return 0, err
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 	if len(result.Result) == 0 {
-		return 0, fmt.Errorf("OPA result invalid")
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 	fieldResult, ok := result.Result[jwtPlugin.opaAllowField]
 	if !ok {
-		return 0, fmt.Errorf("OPA result missing: %v", jwtPlugin.opaAllowField)
-	}
-	for k, v := range jwtPlugin.opaResponseHeaders {
-		var value string
-		if rawVal, rawValOk := result.Result[v]; rawValOk {
-			if err = json.Unmarshal(rawVal, &value); err != nil {
-				value = string(rawVal)
-			}
-			rw.Header().Set(k, value)
-		}
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 
 	var allow bool
 	if err = json.Unmarshal(fieldResult, &allow); err != nil {
-		return 0, err
+		return 0, newErrorResponse(ErrorTypeUnauthenticatedOpaResponseInvalid, nil)
 	}
 
 	if !allow {
-		var notAllowErr error
-		if jwtPlugin.opaDebugMode {
-			notAllowErr = fmt.Errorf("%s", body)
-		} else {
-			notAllowErr = fmt.Errorf("forbidden")
-		}
+		forbiddenErr := newErrorResponse(ErrorTypeUnauthenticatedOpaForbidden, nil)
+		
 		if jwtPlugin.opaHttpStatusField != "" {
 			if rawVal, rawValOk := result.Result[jwtPlugin.opaHttpStatusField]; rawValOk {
 				if st, err := strconv.Atoi(strings.Trim(string(rawVal), `"`)); err == nil {
-					return st, notAllowErr
+					return st, forbiddenErr
 				}
 			}
 		}
-		return 0, notAllowErr
+		return 0, forbiddenErr
 	}
 
 	for k, v := range jwtPlugin.opaHeaders {
@@ -957,4 +999,13 @@ func (logEvent *LogEvent) withUrl(url string) *LogEvent {
 func (logEvent *LogEvent) withSub(sub string) *LogEvent {
 	logEvent.Sub = sub
 	return logEvent
+}
+
+// Helper function to create structured errors
+func newErrorResponse(errorType string, details interface{}) *ErrorResponse {
+	return &ErrorResponse{
+		Type:          errorType,
+		Details:       nil,
+		CustomMessage: nil,
+	}
 }
