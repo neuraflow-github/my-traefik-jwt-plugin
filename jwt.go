@@ -462,7 +462,7 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 		} else {
 			rw.WriteHeader(http.StatusForbidden)
 		}
-		rw.Write(jsonBytes)
+		_, err = rw.Write(jsonBytes)
 		return
 	}
 	jwtPlugin.next.ServeHTTP(rw, request)
