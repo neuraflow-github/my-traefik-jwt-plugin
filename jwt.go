@@ -115,6 +115,7 @@ type JwtPlugin struct {
 	keysLock        sync.RWMutex
 	forceRefreshCmd chan chan<- struct{}
 	cancelCtx       context.Context
+	lastFetchFailed bool
 }
 
 // LogEvent contains a single log entry
@@ -320,10 +321,12 @@ func (jwtPlugin *JwtPlugin) FetchKeys() {
 	logInfo(fmt.Sprintf("FetchKeys - #%d jwkEndpoints to fetch", len(jwtPlugin.jwkEndpoints))).
 		print()
 	fetchedKeys := map[string]interface{}{}
+	jwtPlugin.lastFetchFailed = false
 	for _, u := range jwtPlugin.jwkEndpoints {
 		req, err := http.NewRequest("GET", u.String(), nil)
 		if err != nil {
 			logWarn("FetchKeys - Failed to create request").withUrl(u.String()).print()
+			jwtPlugin.lastFetchFailed = true
 			continue
 		}
 		for headerKey, headerValue := range jwtPlugin.jwksHeaders {
@@ -332,17 +335,20 @@ func (jwtPlugin *JwtPlugin) FetchKeys() {
 		response, err := jwtPlugin.httpClient.Do(req)
 		if err != nil {
 			logWarn("FetchKeys - Failed to fetch keys").withUrl(u.String()).print()
+			jwtPlugin.lastFetchFailed = true
 			continue
 		}
 		body, err := io.ReadAll(response.Body)
 		if err != nil {
 			logWarn("FetchKeys - Failed to read keys").withUrl(u.String()).print()
+			jwtPlugin.lastFetchFailed = true
 			continue
 		}
 		var jwksKeys Keys
 		err = json.Unmarshal(body, &jwksKeys)
 		if err != nil {
 			logWarn("FetchKeys - Failed to unmarshal keys").withUrl(u.String()).print()
+			jwtPlugin.lastFetchFailed = true
 			continue
 		}
 		for _, key := range jwksKeys.Keys {
@@ -697,6 +703,10 @@ func (jwtPlugin *JwtPlugin) getKeysSync() map[string]interface{} {
 }
 
 func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
+	if jwtPlugin.lastFetchFailed && len(jwtPlugin.jwkEndpoints) > 0 {
+		logInfo("VerifyToken - Last key fetch failed, retrying").print()
+		jwtPlugin.FetchKeys()
+	}
 	for _, h := range jwtToken.Header.Crit {
 		if _, ok := supportedHeaderNames[h]; !ok {
 			return newErrorResponse(ErrorTypeUnauthenticatedJwtAlgorithmInvalid, nil)
