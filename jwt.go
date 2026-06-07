@@ -469,6 +469,16 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 }
 
 func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWriter) (int, error) {
+	// Strip any client-supplied values for the configured jwtHeaders before
+	// doing anything else, so a forged X-Account-* header can never survive into
+	// the backend. They are re-added from verified token claims below. This runs
+	// unconditionally - including when Required is false and no/invalid token is
+	// present - because that is exactly the case where a forged header would
+	// otherwise pass through untouched.
+	for k := range jwtPlugin.jwtHeaders {
+		request.Header.Del(k)
+	}
+
 	jwtToken, err := jwtPlugin.ExtractToken(request)
 	if jwtToken == nil {
 		if jwtPlugin.required {
@@ -528,7 +538,7 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 		for k, v := range jwtPlugin.jwtHeaders {
 			_, ok := jwtToken.Payload[v]
 			if ok {
-				request.Header.Add(k, fmt.Sprint(jwtToken.Payload[v]))
+				request.Header.Set(k, fmt.Sprint(jwtToken.Payload[v]))
 			}
 		}
 	}
