@@ -36,6 +36,8 @@ const (
 	ErrorTypeUnauthenticatedJwtSignatureInvalid = "UNAUTHENTICATED_JWT_SIGNATURE_INVALID"
 	ErrorTypeUnauthenticatedJwtFieldMissing     = "UNAUTHENTICATED_JWT_FIELD_MISSING"
 	ErrorTypeUnauthenticatedJwtAlgorithmInvalid = "UNAUTHENTICATED_JWT_ALGORITHM_INVALID"
+	ErrorTypeUnauthenticatedJwtIssuerInvalid    = "UNAUTHENTICATED_JWT_ISSUER_INVALID"
+	ErrorTypeUnauthenticatedJwtAudienceInvalid  = "UNAUTHENTICATED_JWT_AUDIENCE_INVALID"
 	ErrorTypeUnauthenticatedOpaResponseInvalid  = "UNAUTHENTICATED_OPA_RESPONSE_INVALID"
 	ErrorTypeUnauthenticatedOpaForbidden        = "UNAUTHENTICATED_OPA_FORBIDDEN"
 )
@@ -72,6 +74,8 @@ type Config struct {
 	Keys               []string
 	ForceRefreshKeys   bool
 	Alg                string
+	ExpectedIssuer     string
+	ExpectedAudience   string
 	OpaHeaders         map[string]string
 	JwtHeaders         map[string]string
 	JwksHeaders        map[string]string
@@ -104,6 +108,8 @@ type JwtPlugin struct {
 	jwkEndpoints       []*url.URL
 	keys               map[string]interface{}
 	alg                string
+	expectedIssuer     string
+	expectedAudience   string
 	opaHeaders         map[string]string
 	jwtHeaders         map[string]string
 	jwksHeaders        map[string]string
@@ -217,6 +223,8 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		payloadFields:      config.PayloadFields,
 		required:           config.Required,
 		alg:                config.Alg,
+		expectedIssuer:     config.ExpectedIssuer,
+		expectedAudience:   config.ExpectedAudience,
 		keys:               make(map[string]interface{}),
 		opaHeaders:         config.OpaHeaders,
 		jwtHeaders:         config.JwtHeaders,
@@ -478,6 +486,23 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 	jwtPlugin.next.ServeHTTP(rw, request)
 }
 
+// audienceContains reports whether the aud claim carries the expected audience. The claim is a single string for one audience or an array of strings for several, so both shapes are handled.
+func audienceContains(audClaim interface{}, expected string) bool {
+	switch aud := audClaim.(type) {
+	case string:
+		return aud == expected
+	case []interface{}:
+		for _, entry := range aud {
+			if fmt.Sprint(entry) == expected {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWriter) (int, error) {
 	// Strip any client-supplied values for the configured jwtHeaders before
 	// doing anything else, so a forged X-Account-* header can never survive into
@@ -513,6 +538,27 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 					withNetwork(jwtPlugin.remoteAddr(request)).
 					print()
 				return 0, err
+			}
+		}
+		// A valid signature only proves the token was minted by the trusted authority, not that it was minted for this gateway. When several providers share one signing key, the issuer and audience claims are the only thing that distinguishes their tokens, so they are checked by value here. Without this a token issued for another provider is signature-valid and would be accepted.
+		if jwtPlugin.expectedIssuer != "" {
+			if fmt.Sprint(jwtToken.Payload["iss"]) != jwtPlugin.expectedIssuer {
+				logError(fmt.Sprintf("Token issuer %q does not match expected issuer", jwtToken.Payload["iss"])).
+					withSub(sub).
+					withUrl(request.URL.String()).
+					withNetwork(jwtPlugin.remoteAddr(request)).
+					print()
+				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtIssuerInvalid, nil)
+			}
+		}
+		if jwtPlugin.expectedAudience != "" {
+			if !audienceContains(jwtToken.Payload["aud"], jwtPlugin.expectedAudience) {
+				logError(fmt.Sprintf("Token audience %q does not contain expected audience", jwtToken.Payload["aud"])).
+					withSub(sub).
+					withUrl(request.URL.String()).
+					withNetwork(jwtPlugin.remoteAddr(request)).
+					print()
+				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtAudienceInvalid, nil)
 			}
 		}
 		for _, fieldName := range jwtPlugin.payloadFields {

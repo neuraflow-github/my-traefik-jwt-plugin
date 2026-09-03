@@ -1062,7 +1062,7 @@ func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 		t.Fatalf("Expected status code %d, received %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	responseBodyExpected := "http: named cookie not present"
+	responseBodyExpected := `{"type":"UNAUTHENTICATED_JWT_MISSING","details":null,"custom_message":null}`
 	if strings.TrimSpace(string(body)) != responseBodyExpected {
 		t.Fatalf("The body response is expected to be %q, but found: %s", responseBodyExpected, string(body))
 	}
@@ -1183,7 +1183,7 @@ func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 		t.Fatalf("Expected status code %d, received %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	responseBodyExpected := "query parameter missing"
+	responseBodyExpected := `{"type":"UNAUTHENTICATED_JWT_MISSING","details":null,"custom_message":null}`
 	if strings.TrimSpace(string(body)) != responseBodyExpected {
 		t.Fatalf("The body response is expected to be %q, but found: %s", responseBodyExpected, string(body))
 	}
@@ -1383,5 +1383,32 @@ func TestServeHTTPStripsForgedHeaderWithoutToken(t *testing.T) {
 	}
 	if v := req.Header.Get("Name"); v != "" {
 		t.Fatalf("Expected forged Name header to be stripped, got %s", v)
+	}
+}
+
+// TestAudienceContains covers the aud claim shapes: a single string, an array of
+// strings, a missing claim, and a numeric type that never matches. This is the
+// value check that distinguishes tokens minted for another provider when the
+// signing key is shared (finding F1).
+func TestAudienceContains(t *testing.T) {
+	cases := []struct {
+		name     string
+		aud      interface{}
+		expected string
+		want     bool
+	}{
+		{"single string match", "neurapolis-app", "neurapolis-app", true},
+		{"single string mismatch", "librechat", "neurapolis-app", false},
+		{"array contains", []interface{}{"librechat", "neurapolis-app"}, "neurapolis-app", true},
+		{"array missing", []interface{}{"librechat", "other"}, "neurapolis-app", false},
+		{"nil claim", nil, "neurapolis-app", false},
+		{"wrong type", 42, "neurapolis-app", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := audienceContains(c.aud, c.expected); got != c.want {
+				t.Fatalf("audienceContains(%v, %q) = %v, want %v", c.aud, c.expected, got, c.want)
+			}
+		})
 	}
 }
