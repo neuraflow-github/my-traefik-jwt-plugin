@@ -903,8 +903,8 @@ func TestServeHTTPJwtRequired(t *testing.T) {
 	opa.ServeHTTP(recorder, req)
 
 	resp := recorder.Result()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("Expected status code %d, received %d", http.StatusForbidden, resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("Expected status code %d, received %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 	if nextCalled == true {
 		t.Fatal("next.ServeHTTP was called")
@@ -1058,8 +1058,8 @@ func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 	jwt.ServeHTTP(recorder, req)
 
 	resp := recorder.Result()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("Expected status code %d, received %d", http.StatusForbidden, resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("Expected status code %d, received %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	responseBodyExpected := "http: named cookie not present"
@@ -1179,8 +1179,8 @@ func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 	jwt.ServeHTTP(recorder, req)
 
 	resp := recorder.Result()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("Expected status code %d, received %d", http.StatusForbidden, resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("Expected status code %d, received %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	responseBodyExpected := "query parameter missing"

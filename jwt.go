@@ -465,8 +465,12 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 
 		if st >= 300 && st < 600 {
 			rw.WriteHeader(st)
-		} else {
+		} else if errorResponse.Type == ErrorTypeUnauthenticatedOpaForbidden {
+			// An OPA policy denial is an authorization failure, so it stays 403 Forbidden.
 			rw.WriteHeader(http.StatusForbidden)
+		} else {
+			// A missing, expired, or otherwise invalid token is an authentication failure, so it is 401 Unauthorized. Clients refresh the session and retry on 401, which they must not do on a 403.
+			rw.WriteHeader(http.StatusUnauthorized)
 		}
 		_, _ = rw.Write(jsonBytes)
 		return
