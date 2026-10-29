@@ -82,9 +82,9 @@ func TestServeHTTPOK(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Config{
-				JwtHeaders:       map[string]string{"Name": "name"},
-				Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
-				ExpectedAudience: testAudience,
+				JwtHeaders:        map[string]string{"Name": "name"},
+				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 			nextCalled := false
@@ -232,10 +232,10 @@ func TestServeOPAWithBody(t *testing.T) {
 			}))
 			defer ts.Close()
 			cfg := Config{
-				OpaUrl:           fmt.Sprintf("%s/v1/data/testok?Param1=foo&Param1=bar", ts.URL),
-				OpaAllowField:    "allow",
-				OpaBody:          tt.drainBody,
-				ExpectedAudience: testAudience,
+				OpaUrl:            fmt.Sprintf("%s/v1/data/testok?Param1=foo&Param1=bar", ts.URL),
+				OpaAllowField:     "allow",
+				OpaBody:           tt.drainBody,
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -274,9 +274,9 @@ func TestServeOPAWithBody(t *testing.T) {
 func TestServeWithBody(t *testing.T) {
 	// TODO: add more testcases with DSA, etc.
 	cfg := Config{
-		JwtHeaders:       map[string]string{"Name": "name"},
-		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
-		ExpectedAudience: testAudience,
+		JwtHeaders:        map[string]string{"Name": "name"},
+		Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -323,7 +323,7 @@ func TestServeGETWithContentType(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.Required = false
 	cfg.OpaUrl = ts.URL
 
@@ -353,10 +353,10 @@ func TestServeGETWithContentType(t *testing.T) {
 
 func TestServeHTTPInvalidSignature(t *testing.T) {
 	cfg := Config{
-		Required:         true,
-		PayloadFields:    []string{"exp"},
-		Keys:             []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
-		ExpectedAudience: testAudience,
+		Required:          true,
+		PayloadFields:     []string{"exp"},
+		Keys:              []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -384,10 +384,10 @@ func TestServeHTTPInvalidSignature(t *testing.T) {
 
 func TestServeHTTPMissingExp(t *testing.T) {
 	cfg := Config{
-		PayloadFields:    []string{"exp"},
-		Required:         true,
-		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
-		ExpectedAudience: testAudience,
+		PayloadFields:     []string{"exp"},
+		Required:          true,
+		Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -436,7 +436,7 @@ func TestServeHTTPAllowedByOPA(t *testing.T) {
 		OpaBody:            false,
 		OpaHeaders:         map[string]string{"RequestFoo": "foo", "RequestAllow": "allow", "RequestMissing": "missing"},
 		OpaResponseHeaders: map[string]string{"ResponseFoo": "foo", "ResponseAllow": "allow", "ResponseMissing": "missing"},
-		ExpectedAudience:   testAudience,
+		ExpectedAudiences:  []string{testAudience},
 	}
 
 	ctx := context.Background()
@@ -498,7 +498,7 @@ func TestServeHTTPForbiddenByOPA(t *testing.T) {
 		OpaBody:            false,
 		OpaHeaders:         map[string]string{"RequestFoo": "foo", "RequestAllow": "allow", "RequestMissing": "missing"},
 		OpaResponseHeaders: map[string]string{"ResponseFoo": "foo", "ResponseAllow": "allow", "ResponseMissing": "missing"},
-		ExpectedAudience:   testAudience,
+		ExpectedAudiences:  []string{testAudience},
 	}
 	ctx := context.Background()
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { t.Fatal("Should not chain HTTP call") })
@@ -631,8 +631,8 @@ func TestNewJWKEndpoint(t *testing.T) {
 			}))
 			defer ts.Close()
 			cfg := Config{
-				Keys:             []string{ts.URL},
-				ExpectedAudience: testAudience,
+				Keys:              []string{ts.URL},
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 			nextCalled := false
@@ -680,9 +680,9 @@ func TestForceRefreshKeys(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := Config{
-		Keys:             []string{ts.URL},
-		ForceRefreshKeys: true,
-		ExpectedAudience: testAudience,
+		Keys:              []string{ts.URL},
+		ForceRefreshKeys:  true,
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -716,9 +716,9 @@ func TestForceRefreshKeys(t *testing.T) {
 
 func TestIssue3(t *testing.T) {
 	cfg := Config{
-		JwtHeaders:       map[string]string{"Subject": "sub", "User": "preferred_username"},
-		Keys:             []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
-		ExpectedAudience: "account",
+		JwtHeaders:        map[string]string{"Subject": "sub", "User": "preferred_username"},
+		Keys:              []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		ExpectedAudiences: []string{"account"},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -752,9 +752,9 @@ func TestIssue3(t *testing.T) {
 
 func TestIssue13(t *testing.T) {
 	cfg := Config{
-		JwtHeaders:       map[string]string{"Subject": "sub", "User": "preferred_username"},
-		Keys:             []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----", "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmDaxrT7mDmyGHZaBuwq6\nMimV2hUrOoZ86MT/dTpspnNL4DgvvUOjvkn7Oebg9kNmAxjfqDmHtqKdKvot/vZp\nJMPr/+s/haBDN3plDf3SeWOEWwFgVwkLnkOm+mCWEvhYL6bBGCcv9AwYYtyQONKg\n+2NFOVxtQVlGo1Z8xUIY4vELiUcqTjqBZPi3+CaxqWvGsh5Wg4Si84/xKx85Ah6f\nrAtPGGO8wG2Jqlw1R4ZHJmBgXtLXTeDI2zzxugI1BtcQfy5fd9PBVoEM6782km0R\nei3X8CqIMuv00O2juFh2rZxC9ENibTbdf2OueI+sbYoP1FsziruDHJRzKnm/oAVY\nDwIDAQAB\n-----END PUBLIC KEY-----"},
-		ExpectedAudience: "account",
+		JwtHeaders:        map[string]string{"Subject": "sub", "User": "preferred_username"},
+		Keys:              []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----", "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmDaxrT7mDmyGHZaBuwq6\nMimV2hUrOoZ86MT/dTpspnNL4DgvvUOjvkn7Oebg9kNmAxjfqDmHtqKdKvot/vZp\nJMPr/+s/haBDN3plDf3SeWOEWwFgVwkLnkOm+mCWEvhYL6bBGCcv9AwYYtyQONKg\n+2NFOVxtQVlGo1Z8xUIY4vELiUcqTjqBZPi3+CaxqWvGsh5Wg4Si84/xKx85Ah6f\nrAtPGGO8wG2Jqlw1R4ZHJmBgXtLXTeDI2zzxugI1BtcQfy5fd9PBVoEM6782km0R\nei3X8CqIMuv00O2juFh2rZxC9ENibTbdf2OueI+sbYoP1FsziruDHJRzKnm/oAVY\nDwIDAQAB\n-----END PUBLIC KEY-----"},
+		ExpectedAudiences: []string{"account"},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -788,8 +788,8 @@ func TestIssue13(t *testing.T) {
 
 func TestIssue15(t *testing.T) {
 	cfg := Config{
-		JwtHeaders:       map[string]string{"X-Subject": "sub", "X-Exp": "exp", "X-Email-Verified": "email_verified"},
-		ExpectedAudience: "account",
+		JwtHeaders:        map[string]string{"X-Subject": "sub", "X-Exp": "exp", "X-Email-Verified": "email_verified"},
+		ExpectedAudiences: []string{"account"},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -870,7 +870,7 @@ func TestServeHTTPExpiration(t *testing.T) {
 			nextCalled := false
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
 
-			jwt, err := New(ctx, next, &Config{PayloadFields: tt.Fields, ExpectedAudience: testAudience}, "test-traefik-jwt-plugin")
+			jwt, err := New(ctx, next, &Config{PayloadFields: tt.Fields, ExpectedAudiences: []string{testAudience}}, "test-traefik-jwt-plugin")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -906,11 +906,11 @@ func TestServeHTTPJwtRequired(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := Config{
-		OpaAllowField:    "allow",
-		Required:         true,
-		OpaUrl:           ts.URL,
-		OpaBody:          false,
-		ExpectedAudience: testAudience,
+		OpaAllowField:     "allow",
+		Required:          true,
+		OpaUrl:            ts.URL,
+		OpaBody:           false,
+		ExpectedAudiences: []string{testAudience},
 	}
 
 	ctx := context.Background()
@@ -1006,7 +1006,7 @@ func TestServeHTTPStatusFromOPA(t *testing.T) {
 				OpaUrl:             ts.URL,
 				OpaBody:            false,
 				OpaHttpStatusField: tt.opaHttpStatusField,
-				ExpectedAudience:   testAudience,
+				ExpectedAudiences:  []string{testAudience},
 			}
 
 			ctx := context.Background()
@@ -1041,7 +1041,7 @@ func TestServeHTTPStatusFromOPA(t *testing.T) {
 
 func TestTokenFromCookieConfigured(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtCookieKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1070,7 +1070,7 @@ func TestTokenFromCookieConfigured(t *testing.T) {
 
 func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtCookieKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1107,7 +1107,7 @@ func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 
 func TestTokenFromCookieNotConfigured(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	ctx := context.Background()
 	nextCalled := false
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
@@ -1135,7 +1135,7 @@ func TestTokenFromCookieNotConfigured(t *testing.T) {
 
 func TestTokenFromQueryConfigured(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtQueryKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1165,7 +1165,7 @@ func TestTokenFromQueryConfigured(t *testing.T) {
 
 func TestTokenFromQueryNotConfigured(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	ctx := context.Background()
 	nextCalled := false
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
@@ -1195,7 +1195,7 @@ func TestTokenFromQueryNotConfigured(t *testing.T) {
 
 func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtQueryKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1232,7 +1232,7 @@ func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 
 func TestTokenFromHeaderConfigured(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtSources = []map[string]string{{"type": "header", "key": "X-JWT"}}
 	ctx := context.Background()
 	nextCalled := false
@@ -1260,7 +1260,7 @@ func TestTokenFromHeaderConfigured(t *testing.T) {
 
 func TestTokenSourceOrder(t *testing.T) {
 	cfg := *CreateConfig()
-	cfg.ExpectedAudience = testAudience
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtSources = []map[string]string{{"type": "header", "key": "X-JWT"}, {"type": "cookie", "key": "jwt"}}
 	ctx := context.Background()
 	nextCalled := false
@@ -1318,8 +1318,8 @@ func TestJwksHeaders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Config{
-				JwksHeaders:      tt.jwksHeaders,
-				ExpectedAudience: testAudience,
+				JwksHeaders:       tt.jwksHeaders,
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 
@@ -1357,9 +1357,9 @@ func mustParseUrl(urlStr string) *url.URL {
 // value, leaving exactly one value and no trace of the forged one.
 func TestServeHTTPStripsForgedHeaderWithValidToken(t *testing.T) {
 	cfg := Config{
-		JwtHeaders:       map[string]string{"Name": "name"},
-		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
-		ExpectedAudience: testAudience,
+		JwtHeaders:        map[string]string{"Name": "name"},
+		Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -1397,9 +1397,9 @@ func TestServeHTTPStripsForgedHeaderWithValidToken(t *testing.T) {
 // stripped, not passed through to the backend.
 func TestServeHTTPStripsForgedHeaderWithoutToken(t *testing.T) {
 	cfg := Config{
-		Required:         false,
-		JwtHeaders:       map[string]string{"Name": "name"},
-		ExpectedAudience: testAudience,
+		Required:          false,
+		JwtHeaders:        map[string]string{"Name": "name"},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -1464,7 +1464,6 @@ func TestServeHTTPExpectedAudiencesSigned(t *testing.T) {
 
 	cases := []struct {
 		name              string
-		expectedAudience  string
 		expectedAudiences []string
 		signingKey        *rsa.PrivateKey
 		iss               string
@@ -1472,25 +1471,24 @@ func TestServeHTTPExpectedAudiencesSigned(t *testing.T) {
 		exp               int64
 		wantErrorType     string
 	}{
-		{"YAML list passes an array aud", "", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, []interface{}{"other", "neuraplex"}, validExp, ""},
-		{"comma-separated string with spaces passes", "", strings.Split("neurapolis-app, neuraplex", ","), testPrivateKey, issuer, "neuraplex", validExp, ""},
-		{"single value next to a list passes the single value", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "neurapolis-app", validExp, ""},
-		{"other signing key rejected before the issuer and the audience", "neurapolis-app", []string{"neuraplex"}, otherPrivateKey, "https://other.example.test/", "librechat", validExp, ErrorTypeUnauthenticatedJwtSignatureInvalid},
-		{"other issuer rejected before the audience", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, "https://auth.example.test/application/o/neuraplex/", "librechat", validExp, ErrorTypeUnauthenticatedJwtIssuerInvalid},
-		{"other audience rejected", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "librechat", validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
-		{"expired token with another audience rejected for the audience before the exp claim", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "librechat", expiredExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
-		{"expired token with an audience of the list rejected as expired", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "neuraplex", expiredExp, ErrorTypeUnauthenticatedJwtExpired},
-		{"missing audience rejected", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, nil, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
-		{"numeric aud never matches its formatted form", "42", nil, testPrivateKey, issuer, 42, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
-		{"numeric aud entry never matches its formatted form", "42", nil, testPrivateKey, issuer, []interface{}{42}, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
-		{"string aud entry next to a numeric entry passes", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, []interface{}{42, "neuraplex"}, validExp, ""},
+		{"YAML list passes an array aud", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, []interface{}{"other", "neuraplex"}, validExp, ""},
+		{"comma-separated string with spaces passes", strings.Split("neurapolis-app, neuraplex", ","), testPrivateKey, issuer, "neuraplex", validExp, ""},
+		{"first audience of the list passes", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "neurapolis-app", validExp, ""},
+		{"other signing key rejected before the issuer and the audience", []string{"neurapolis-app", "neuraplex"}, otherPrivateKey, "https://other.example.test/", "librechat", validExp, ErrorTypeUnauthenticatedJwtSignatureInvalid},
+		{"other issuer rejected before the audience", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, "https://auth.example.test/application/o/neuraplex/", "librechat", validExp, ErrorTypeUnauthenticatedJwtIssuerInvalid},
+		{"other audience rejected", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "librechat", validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"expired token with another audience rejected for the audience before the exp claim", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "librechat", expiredExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"expired token with an audience of the list rejected as expired", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "neuraplex", expiredExp, ErrorTypeUnauthenticatedJwtExpired},
+		{"missing audience rejected", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, nil, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"numeric aud never matches its formatted form", []string{"42"}, testPrivateKey, issuer, 42, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"numeric aud entry never matches its formatted form", []string{"42"}, testPrivateKey, issuer, []interface{}{42}, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"string aud entry next to a numeric entry passes", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, []interface{}{42, "neuraplex"}, validExp, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := Config{
 				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 				ExpectedIssuer:    issuer,
-				ExpectedAudience:  c.expectedAudience,
 				ExpectedAudiences: c.expectedAudiences,
 				PayloadFields:     []string{"exp"},
 				JwtHeaders:        map[string]string{"X-Account-Id": "sub"},
@@ -1545,21 +1543,19 @@ func TestDecodedConfigurationAudienceCheck(t *testing.T) {
 	// The table mirrors the Config values that createConfig in pkg/plugins/middlewareyaegi.go of Traefik v3.7.10 decodes with mapstructure v1.5.1-0.20231216201459-8508981c8b6c from each raw configuration.
 	cases := []struct {
 		name              string
-		expectedAudience  string
 		expectedAudiences []string
 		wantPass          bool
 	}{
-		{`ExpectedAudience: neurapolis-app, ExpectedAudiences: "" or []`, "neurapolis-app", []string{}, false},
-		{`ExpectedAudience: "" or omitted, ExpectedAudiences: null, omitted or misspelled`, "", nil, false},
-		{`ExpectedAudiences: "neurapolis-app,"`, "", []string{"neurapolis-app", ""}, false},
-		{`ExpectedAudience: " "`, " ", nil, false},
-		{`ExpectedAudience: " neurapolis-app "`, " neurapolis-app ", nil, true},
+		{`ExpectedAudiences: "" or []`, []string{}, false},
+		{`ExpectedAudiences: null, omitted or misspelled`, nil, false},
+		{`ExpectedAudiences: "neurapolis-app,"`, []string{"neurapolis-app", ""}, false},
+		{`ExpectedAudiences: " "`, []string{" "}, false},
+		{`ExpectedAudiences: " neurapolis-app "`, []string{" neurapolis-app "}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			config := &Config{
 				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
-				ExpectedAudience:  c.expectedAudience,
 				ExpectedAudiences: c.expectedAudiences,
 			}
 			token := createSignedTestToken(t, testPrivateKey, map[string]interface{}{"sub": "user-1", "aud": "neurapolis-app"})
