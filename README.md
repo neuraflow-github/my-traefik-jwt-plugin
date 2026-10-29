@@ -42,7 +42,7 @@ traefik \
 
 ## Configuration
 
-The plugin currently supports the following configuration settings: (all fields are optional except an audience in `ExpectedAudience` or `ExpectedAudiences`)
+The plugin currently supports the following configuration settings: (all fields are optional except `Keys` and an audience in `ExpectedAudience` or `ExpectedAudiences`)
 
 Name | Description
 ---- | ----
@@ -52,7 +52,7 @@ OpaBody | Boolean indicating whether the request body should be added to the OPA
 OpaDebugMode | Set the opa response in the http response body when the request isn't allowed otherwise the response body is `forbidden`
 PayloadFields | The field-name in the JWT payload that are required (e.g. `exp`). Multiple field names may be specified (string array)
 Required | Is `Authorization` header with JWT token required for every request.
-Keys | Used to validate JWT signature. Multiple keys are supported. Allowed values include certificates, public keys, symmetric keys. In case the value is a valid URL, the plugin will fetch keys from the JWK endpoint. A successful fetch replaces the keys that the endpoint returned before, so a key that it no longer returns stops being trusted. When a fetch fails, the plugin keeps the keys of that endpoint's last successful fetch. A request to a JWK endpoint times out after 5 seconds, and after a failed fetch the requests start at most one new fetch every 10 seconds in the background instead of waiting for it.
+Keys | Used to validate JWT signature. Multiple keys are supported. Allowed values include certificates, public keys, symmetric keys. In case the value is a valid URL, the plugin will fetch keys from the JWK endpoint. A successful fetch replaces the keys that the endpoint returned before, so a key that it no longer returns stops being trusted. When a fetch fails, the plugin keeps the keys of that endpoint's last successful fetch. A request to a JWK endpoint times out after 5 seconds, and after a failed fetch the requests start at most one new fetch every 10 seconds in the background instead of waiting for it. `Keys` is mandatory. Every token is verified, there is no unverified mode and no setting that turns verification off, and a config without `Keys` is a [configuration error](#configuration-errors).
 ForceRefreshKeys | Force fetching keys from JWKS service when the key of current JWT token is not found. If set false, keys will only be refreshed every 15 minutes by default.
 Alg | Used to verify which PKI algorithm is used in the JWT.
 ExpectedIssuer | Value the `iss` claim of the JWT must equal. If empty, the issuer is not checked.
@@ -81,9 +81,9 @@ JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT.
 
 ### Configuration errors
 
-The plugin checks the audience settings when the middleware is created. A configuration error that it detects there does not stop the middleware from loading. Instead the middleware answers every request with a `500` and the error type `UNAUTHENTICATED_CONFIGURATION_INVALID`, never passes a request on, and still removes the headers named in `JwtHeaders` from the request. It is a `500` and not a `401`, because clients refresh the session and retry on a `401`. The plugin logs the error once when the middleware is created, naming the middleware, and Traefik shows it at the `ERROR` level.
+The plugin checks the audience settings and the `Keys` setting, which must name at least one usable key or JWK endpoint, when the middleware is created. A configuration error that it detects there does not stop the middleware from loading. Instead the middleware answers every request with a `500` and the error type `UNAUTHENTICATED_CONFIGURATION_INVALID`, never passes a request on, and still removes the headers named in `JwtHeaders` from the request. It is a `500` and not a `401`, because clients refresh the session and retry on a `401`. The plugin logs the error once when the middleware is created, naming the middleware, and Traefik shows it at the `ERROR` level.
 
-A middleware that fails to load would be worse. Traefik skips every router that uses it, so a request reaches the next router that matches it, which may not check a token at all. This still happens when Traefik cannot decode a setting into its type, for example a `Required` that is not a boolean, because Traefik decodes the settings before the plugin runs, and when a `Keys` entry cannot be used.
+A middleware that fails to load would be worse. Traefik skips every router that uses it, so a request reaches the next router that matches it, which may not check a token at all. This still happens when Traefik cannot decode a setting into its type, for example a `Required` that is not a boolean, because Traefik decodes the settings before the plugin runs.
 
 The per-request logs of the plugin, such as a rejected audience, go to stdout, which Traefik only shows at the `DEBUG` level.
 

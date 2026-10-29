@@ -275,9 +275,14 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 			jwtPlugin.jwtSources = append(jwtPlugin.jwtSources, map[string]string{"type": "query", "key": config.JwtQueryKey})
 		}
 	}
+	if len(config.Keys) == 0 {
+		jwtPlugin.rejectEveryRequest(fmt.Errorf("Invalid configuration of middleware %s, because Keys is empty, but must name at least one PEM certificate, PEM public key or JWK URL", pluginName))
+		return jwtPlugin, nil
+	}
 	store, err := getKeyStore(ctx, config.Keys, config.JwksHeaders, pluginName)
 	if err != nil {
-		return nil, err
+		jwtPlugin.rejectEveryRequest(fmt.Errorf("Invalid configuration of middleware %s, because a Keys entry cannot be used (%v), but must be a PEM certificate, a PEM public key or a JWK URL", pluginName, err))
+		return jwtPlugin, nil
 	}
 	jwtPlugin.keyStore = store
 	return jwtPlugin, nil
@@ -686,16 +691,13 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 	sub := ""
 	if jwtToken != nil {
 		sub = fmt.Sprint(jwtToken.Payload["sub"])
-		// only verify jwt tokens if keys are configured
-		if len(jwtPlugin.keyStore.getKeysSync()) > 0 || len(jwtPlugin.keyStore.jwkEndpoints) > 0 {
-			if err = jwtPlugin.VerifyToken(jwtToken); err != nil {
-				logError(fmt.Sprintf("Token is invalid - err: %s", err.Error())).
-					withSub(sub).
-					withUrl(request.URL.String()).
-					withNetwork(jwtPlugin.remoteAddr(request)).
-					print()
-				return 0, err
-			}
+		if err = jwtPlugin.VerifyToken(jwtToken); err != nil {
+			logError(fmt.Sprintf("Token is invalid - err: %s", err.Error())).
+				withSub(sub).
+				withUrl(request.URL.String()).
+				withNetwork(jwtPlugin.remoteAddr(request)).
+				print()
+			return 0, err
 		}
 		// A valid signature only proves the token was minted by the trusted authority, not that it was minted for this gateway. When several providers share one signing key, the issuer and audience claims are the only thing that distinguishes their tokens, so they are checked by value here. Without this a token issued for another provider is signature-valid and would be accepted.
 		if jwtPlugin.expectedIssuer != "" {

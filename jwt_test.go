@@ -236,6 +236,7 @@ func TestServeOPAWithBody(t *testing.T) {
 				OpaUrl:           fmt.Sprintf("%s/v1/data/testok?Param1=foo&Param1=bar", ts.URL),
 				OpaAllowField:    "allow",
 				OpaBody:          tt.drainBody,
+				Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 				ExpectedAudience: testAudience,
 			}
 			ctx := context.Background()
@@ -260,7 +261,7 @@ func TestServeOPAWithBody(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header["Authorization"] = []string{"Bearer " + createUnsignedTestToken(t, createJohnDoeTestPayload())}
+			req.Header["Authorization"] = []string{"Bearer " + createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload())}
 			req.Header["Content-Type"] = []string{tt.contentType}
 
 			jwt.ServeHTTP(recorder, req)
@@ -324,6 +325,7 @@ func TestServeGETWithContentType(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.Required = false
 	cfg.OpaUrl = ts.URL
@@ -437,6 +439,7 @@ func TestServeHTTPAllowedByOPA(t *testing.T) {
 		OpaBody:            false,
 		OpaHeaders:         map[string]string{"RequestFoo": "foo", "RequestAllow": "allow", "RequestMissing": "missing"},
 		OpaResponseHeaders: map[string]string{"ResponseFoo": "foo", "ResponseAllow": "allow", "ResponseMissing": "missing"},
+		Keys:               []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 		ExpectedAudience:   testAudience,
 	}
 
@@ -499,6 +502,7 @@ func TestServeHTTPForbiddenByOPA(t *testing.T) {
 		OpaBody:            false,
 		OpaHeaders:         map[string]string{"RequestFoo": "foo", "RequestAllow": "allow", "RequestMissing": "missing"},
 		OpaResponseHeaders: map[string]string{"ResponseFoo": "foo", "ResponseAllow": "allow", "ResponseMissing": "missing"},
+		Keys:               []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 		ExpectedAudience:   testAudience,
 	}
 	ctx := context.Background()
@@ -1038,6 +1042,7 @@ func TestIssue13(t *testing.T) {
 func TestIssue15(t *testing.T) {
 	cfg := Config{
 		JwtHeaders:       map[string]string{"X-Subject": "sub", "X-Exp": "exp", "X-Email-Verified": "email_verified"},
+		Keys:             []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
 		ExpectedAudience: "account",
 	}
 	ctx := context.Background()
@@ -1119,7 +1124,7 @@ func TestServeHTTPExpiration(t *testing.T) {
 			nextCalled := false
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
 
-			jwt, err := New(ctx, next, &Config{PayloadFields: tt.Fields, ExpectedAudience: testAudience}, "test-traefik-jwt-plugin")
+			jwt, err := New(ctx, next, &Config{PayloadFields: tt.Fields, Keys: []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}, ExpectedAudience: testAudience}, "test-traefik-jwt-plugin")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1131,7 +1136,11 @@ func TestServeHTTPExpiration(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			req.Header["Authorization"] = []string{"Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9." + base64.RawURLEncoding.EncodeToString([]byte(tt.Claims)) + ".JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A"}
+			var claims map[string]interface{}
+			if err := json.Unmarshal([]byte(tt.Claims), &claims); err != nil {
+				t.Fatal(err)
+			}
+			req.Header["Authorization"] = []string{"Bearer " + createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, claims, testPrivateKey)}
 
 			jwt.ServeHTTP(recorder, req)
 
@@ -1159,6 +1168,7 @@ func TestServeHTTPJwtRequired(t *testing.T) {
 		Required:         true,
 		OpaUrl:           ts.URL,
 		OpaBody:          false,
+		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 		ExpectedAudience: testAudience,
 	}
 
@@ -1255,6 +1265,7 @@ func TestServeHTTPStatusFromOPA(t *testing.T) {
 				OpaUrl:             ts.URL,
 				OpaBody:            false,
 				OpaHttpStatusField: tt.opaHttpStatusField,
+				Keys:               []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 				ExpectedAudience:   testAudience,
 			}
 
@@ -1290,6 +1301,7 @@ func TestServeHTTPStatusFromOPA(t *testing.T) {
 
 func TestTokenFromCookieConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.JwtCookieKey = "jwt"
 	ctx := context.Background()
@@ -1308,7 +1320,7 @@ func TestTokenFromCookieConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req.AddCookie(&http.Cookie{Name: "jwt", Value: createUnsignedTestToken(t, createJohnDoeTestPayload())})
+	req.AddCookie(&http.Cookie{Name: "jwt", Value: createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload())})
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1319,6 +1331,7 @@ func TestTokenFromCookieConfigured(t *testing.T) {
 
 func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.JwtCookieKey = "jwt"
 	ctx := context.Background()
@@ -1356,6 +1369,7 @@ func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 
 func TestTokenFromCookieNotConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	ctx := context.Background()
 	nextCalled := false
@@ -1373,7 +1387,7 @@ func TestTokenFromCookieNotConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req.AddCookie(&http.Cookie{Name: "jwt", Value: createUnsignedTestToken(t, createJohnDoeTestPayload())})
+	req.AddCookie(&http.Cookie{Name: "jwt", Value: createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload())})
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1384,6 +1398,7 @@ func TestTokenFromCookieNotConfigured(t *testing.T) {
 
 func TestTokenFromQueryConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.JwtQueryKey = "jwt"
 	ctx := context.Background()
@@ -1402,7 +1417,7 @@ func TestTokenFromQueryConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := req.URL.Query()
-	query.Add("jwt", createUnsignedTestToken(t, createJohnDoeTestPayload()))
+	query.Add("jwt", createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload()))
 	req.URL.RawQuery = query.Encode()
 
 	jwt.ServeHTTP(recorder, req)
@@ -1414,6 +1429,7 @@ func TestTokenFromQueryConfigured(t *testing.T) {
 
 func TestTokenFromQueryNotConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	ctx := context.Background()
 	nextCalled := false
@@ -1432,7 +1448,7 @@ func TestTokenFromQueryNotConfigured(t *testing.T) {
 	}
 
 	query := req.URL.Query()
-	query.Add("jwt", createUnsignedTestToken(t, createJohnDoeTestPayload()))
+	query.Add("jwt", createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload()))
 	req.URL.RawQuery = query.Encode()
 
 	jwt.ServeHTTP(recorder, req)
@@ -1444,6 +1460,7 @@ func TestTokenFromQueryNotConfigured(t *testing.T) {
 
 func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.JwtQueryKey = "jwt"
 	ctx := context.Background()
@@ -1481,6 +1498,7 @@ func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 
 func TestTokenFromHeaderConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.JwtSources = []map[string]string{{"type": "header", "key": "X-JWT"}}
 	ctx := context.Background()
@@ -1498,7 +1516,7 @@ func TestTokenFromHeaderConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header["X-JWT"] = []string{createUnsignedTestToken(t, createJohnDoeTestPayload())}
+	req.Header["X-JWT"] = []string{createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload())}
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1509,6 +1527,7 @@ func TestTokenFromHeaderConfigured(t *testing.T) {
 
 func TestTokenSourceOrder(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.Keys = []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)}
 	cfg.ExpectedAudience = testAudience
 	cfg.JwtSources = []map[string]string{{"type": "header", "key": "X-JWT"}, {"type": "cookie", "key": "jwt"}}
 	ctx := context.Background()
@@ -1526,7 +1545,7 @@ func TestTokenSourceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.AddCookie(&http.Cookie{Name: "jwt", Value: createUnsignedTestToken(t, createJohnDoeTestPayload())})
+	req.AddCookie(&http.Cookie{Name: "jwt", Value: createSignedTestToken(t, testPrivateKey, createJohnDoeTestPayload())})
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1639,6 +1658,7 @@ func TestServeHTTPStripsForgedHeaderWithoutToken(t *testing.T) {
 	cfg := Config{
 		Required:         false,
 		JwtHeaders:       map[string]string{"Name": "name"},
+		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
 		ExpectedAudience: testAudience,
 	}
 	ctx := context.Background()
@@ -1817,6 +1837,38 @@ func TestDecodedConfigurationAudienceCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewRejectsEveryRequestOnInvalidKeys checks that a Keys entry that cannot be used gives a middleware that answers every request with a 500, like an invalid audience configuration does, even when a usable key stands next to it.
+func TestNewRejectsEveryRequestOnInvalidKeys(t *testing.T) {
+	publicKeyPem := createTestPublicKeyPem(t, &testPrivateKey.PublicKey)
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		{"neither PEM nor URL", "not-a-key"},
+		{"extra data after a PEM block", publicKeyPem + "extra"},
+		{"PEM certificate that cannot be parsed", string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")}))},
+		{"PEM public key that cannot be parsed", string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: []byte("not a public key")}))},
+		{"unsupported PEM block", string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a public key")}))},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{
+				Keys:             []string{publicKeyPem, c.entry},
+				ExpectedAudience: "neurapolis-app",
+			}
+
+			assertNewRejectsEveryRequest(t, &cfg, createSignedTestToken(t, testPrivateKey, map[string]interface{}{"sub": "user-1", "aud": "neurapolis-app"}))
+		})
+	}
+}
+
+// TestNewRejectsEveryRequestWithoutKeys checks that a middleware without Keys answers every request with a 500, so that a fabricated token that claims another user never reaches the backend unverified.
+func TestNewRejectsEveryRequestWithoutKeys(t *testing.T) {
+	cfg := Config{ExpectedAudience: "neurapolis-app"}
+
+	assertNewRejectsEveryRequest(t, &cfg, createUnsignedTestToken(t, map[string]interface{}{"sub": "victim", "aud": "neurapolis-app"}))
 }
 
 // TestNewLogsInvalidConfigurationOnce checks that New logs an invalid configuration once, naming the middleware, through the log package, which yaegi sends to the stderr that Traefik logs at the ERROR level. Requests do not log it again.
