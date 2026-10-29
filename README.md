@@ -42,7 +42,7 @@ traefik \
 
 ## Configuration
 
-The plugin currently supports the following configuration settings: (all fields are optional except `Keys` and an audience in `ExpectedAudience` or `ExpectedAudiences`)
+The plugin currently supports the following configuration settings: (all fields are optional except `Keys` and `ExpectedAudiences`)
 
 Name | Description
 ---- | ----
@@ -56,8 +56,7 @@ Keys | Used to validate JWT signature. Multiple keys are supported. Allowed valu
 ForceRefreshKeys | Force fetching keys from JWKS service when the key of current JWT token is not found. If set false, keys will only be refreshed every 15 minutes by default.
 Alg | Used to verify which PKI algorithm is used in the JWT.
 ExpectedIssuer | Value the `iss` claim of the JWT must equal. If empty, the issuer is not checked.
-ExpectedAudience | Audience the `aud` claim of the JWT (a string or an array of strings) must contain, combined with `ExpectedAudiences`. Empty or omitted means not set. `ExpectedAudience` and `ExpectedAudiences` together must name at least one audience. See [Audience check](#audience-check).
-ExpectedAudiences | List of accepted audiences (string array, or a comma-separated string), combined with `ExpectedAudience`. The JWT passes when its `aud` claim (a string or an array of strings) contains at least one of them. See [Audience check](#audience-check).
+ExpectedAudiences | List of accepted audiences (string array, or a comma-separated string), at least one. The JWT passes when its `aud` claim (a string or an array of strings) contains at least one of them. See [Audience check](#audience-check).
 JwksHeaders | Map used to add headers to a JWKS request (e.g. credentials for a 3rd party JWKS service).
 JwtHeaders | Map used to inject JWT payload fields as HTTP request headers.
 OpaHeaders | Map used to inject OPA result fields as HTTP request headers. Populated if request is allowed by OPA. Only 1st level keys from OPA document are supported.
@@ -69,15 +68,13 @@ JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT.
 
 ### Audience check
 
-`ExpectedAudience` and `ExpectedAudiences` are merged into one list of accepted audiences. A token passes when its `aud` claim contains at least one of them. Only string values in the claim count, so a number, a nested array or an object never matches. The check runs after the signature and issuer checks and before the `PayloadFields` checks such as `exp`.
+A token passes when its `aud` claim contains at least one of the `ExpectedAudiences`. Only string values in the claim count, so a number, a nested array or an object never matches. The check runs after the signature and issuer checks and before the `PayloadFields` checks such as `exp`.
 
-- An audience is mandatory, and no setting turns the check off. A config that names no audience is a [configuration error](#configuration-errors). v1.0.9 accepted such a config and skipped the audience check.
-- An omitted or `null` `ExpectedAudiences` means that the list is not set. `""` and `[]` set an empty list, which is a configuration error. Traefik decodes both into an empty list, and its file provider turns `[]` into `""` first.
-- An empty or omitted `ExpectedAudience` means that the single value is not set. This includes a value that a template renders from an unset environment variable.
-- Every value is trimmed of surrounding whitespace. Traefik splits a comma-separated string such as `"neurapolis-app, neuraplex"` into a list without trimming, so the trimming makes that form work. This changes how a value with surrounding whitespace behaves: in v1.0.9 `" neurapolis-app"` rejected every token, now it matches `neurapolis-app`.
-- An `ExpectedAudiences` entry that is blank after trimming, for example from `[""]` or from the trailing comma in `"neurapolis-app,"`, or an `ExpectedAudience` that consists only of whitespace, is a configuration error.
-- A misspelled key such as `ExpectedAudences` is ignored, because Traefik does not reject unknown plugin settings. The middleware then behaves as if the setting were missing.
-- Keep the single `ExpectedAudience` set as long as a rollback to v1.0.9 is possible. v1.0.9 ignores `ExpectedAudiences`, so a config that only sets `ExpectedAudiences` has no audience check there.
+- An audience is mandatory, and no setting turns the check off. An omitted, `null`, `""` or `[]` `ExpectedAudiences` is a [configuration error](#configuration-errors). Traefik decodes `""` and `[]` into an empty list, and its file provider turns `[]` into `""` first.
+- Every value is trimmed of surrounding whitespace. Traefik splits a comma-separated string such as `"neurapolis-app, neuraplex"` into a list without trimming, so the trimming makes that form work.
+- An entry that is blank after trimming, for example from `[""]` or from the trailing comma in `"neurapolis-app,"`, is a configuration error.
+- A misspelled key such as `ExpectedAudences`, or the single `ExpectedAudience` of v1.0.9, is ignored, because Traefik does not reject unknown plugin settings. The middleware then has no audience, which is a configuration error.
+- v1.0.9 knows only the single `ExpectedAudience` and ignores `ExpectedAudiences`, so a rollback to v1.0.9 needs `ExpectedAudience` set again.
 
 ### Configuration errors
 
@@ -106,7 +103,8 @@ spec:
       PayloadFields:
         - exp
       Required: true
-      ExpectedAudience: example-audience
+      ExpectedAudiences:
+        - example-audience
       Keys:
         - https://samples.auth0.com/.well-known/jwks.json
         - |

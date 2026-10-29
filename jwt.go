@@ -87,7 +87,6 @@ type Config struct {
 	ForceRefreshKeys   bool
 	Alg                string
 	ExpectedIssuer     string
-	ExpectedAudience   string
 	ExpectedAudiences  []string
 	OpaHeaders         map[string]string
 	JwtHeaders         map[string]string
@@ -241,7 +240,7 @@ type Response struct {
 
 // New creates a new plugin
 func New(ctx context.Context, next http.Handler, config *Config, pluginName string) (http.Handler, error) {
-	expectedAudiences, err := mergeExpectedAudiences(config.ExpectedAudience, config.ExpectedAudiences, pluginName)
+	expectedAudiences, err := normalizeExpectedAudiences(config.ExpectedAudiences, pluginName)
 	jwtPlugin := &JwtPlugin{
 		next:               next,
 		opaUrl:             config.OpaUrl,
@@ -608,30 +607,20 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 	jwtPlugin.next.ServeHTTP(rw, request)
 }
 
-// mergeExpectedAudiences combines the single ExpectedAudience with the ExpectedAudiences list into one list of values trimmed of surrounding whitespace. Traefik decodes a comma-separated string into the list without trimming, so "a, b" arrives as "a" and " b". An empty ExpectedAudience means that the single value is not set, as before the list existed. A value that is blank after trimming is a configuration error, because it is a mistake such as a trailing comma in "a," or a chart that renders an unset value into the list. An ExpectedAudiences list that is set but empty is a configuration error for the same reason. Traefik decodes both "" and [] into an empty list that is not nil, while an omitted or null setting stays nil. An audience is mandatory, so an empty result is a configuration error as well. This also catches a misspelled setting, because Traefik ignores unknown keys.
-func mergeExpectedAudiences(expectedAudience string, expectedAudiences []string, pluginName string) ([]string, error) {
-	if expectedAudiences != nil && len(expectedAudiences) == 0 {
-		return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudiences is set to an empty list, but must be omitted or name at least one audience", pluginName)
+// normalizeExpectedAudiences trims every ExpectedAudiences entry of surrounding whitespace. Traefik decodes a comma-separated string into the list without trimming, so "a, b" arrives as "a" and " b". An audience is mandatory, so an omitted, null or empty list is a configuration error, and so is an entry that is blank after trimming, a mistake such as the trailing comma in "a,". This also catches a misspelled setting, because Traefik ignores unknown keys. Traefik decodes both "" and [] into an empty list.
+func normalizeExpectedAudiences(expectedAudiences []string, pluginName string) ([]string, error) {
+	if len(expectedAudiences) == 0 {
+		return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudiences names no audience, but must name at least one", pluginName)
 	}
-	merged := make([]string, 0, len(expectedAudiences)+1)
-	if expectedAudience != "" {
-		trimmed := strings.TrimSpace(expectedAudience)
-		if trimmed == "" {
-			return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudience %q is blank after trimming whitespace, but must be empty or name an audience", pluginName, expectedAudience)
-		}
-		merged = append(merged, trimmed)
-	}
+	normalized := make([]string, 0, len(expectedAudiences))
 	for index, audience := range expectedAudiences {
 		trimmed := strings.TrimSpace(audience)
 		if trimmed == "" {
 			return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudiences entry %d (%q) is blank after trimming whitespace, but must name an audience", pluginName, index, audience)
 		}
-		merged = append(merged, trimmed)
+		normalized = append(normalized, trimmed)
 	}
-	if len(merged) == 0 {
-		return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudience and ExpectedAudiences name no audience, but must name at least one", pluginName)
-	}
-	return merged, nil
+	return normalized, nil
 }
 
 // audienceContainsAny reports whether the aud claim carries at least one of the expected audiences.
