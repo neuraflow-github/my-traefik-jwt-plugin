@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -634,7 +635,8 @@ func TestNewJWKEndpoint(t *testing.T) {
 				Keys:             []string{ts.URL},
 				ExpectedAudience: testAudience,
 			}
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			nextCalled := false
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
 
@@ -684,7 +686,8 @@ func TestForceRefreshKeys(t *testing.T) {
 		ForceRefreshKeys: true,
 		ExpectedAudience: testAudience,
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	nextCalled := false
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
 	opa, err := New(ctx, next, &cfg, "test-traefik-jwt-plugin")
@@ -711,6 +714,252 @@ func TestForceRefreshKeys(t *testing.T) {
 	}
 	if jwksCalledCounter != 2 {
 		t.Fatalf("jwks was called: %d times, expected: %d", jwksCalledCounter, 2)
+	}
+}
+
+// TestJwksRefreshReplacesTheKeysOfEachEndpoint checks that a successful fetch replaces the keys of an endpoint, so that a key that it no longer serves stops passing. An endpoint whose fetch fails keeps the keys of its last successful fetch, and the static keys stay.
+func TestJwksRefreshReplacesTheKeysOfEachEndpoint(t *testing.T) {
+	keyA := generateTestPrivateKey()
+	keyB := generateTestPrivateKey()
+	keyC := generateTestPrivateKey()
+	rotatingServer := startJwksTestServer(t, map[string]*rsa.PrivateKey{"a": keyA})
+	failingServer := startJwksTestServer(t, map[string]*rsa.PrivateKey{"c": keyC})
+	cfg := Config{
+		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey), rotatingServer.URL, failingServer.URL},
+		ExpectedAudience: testAudience,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler, err := New(ctx, http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {}), &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTestKey(t, handler, "a")
+	if status := serveTestRequest(t, handler, createJwksTestToken(t, "a", keyA)); status != http.StatusOK {
+		t.Fatalf("Expected the token of key a to pass before the rotation, got status %d", status)
+	}
+
+	rotatingServer.serve(map[string]*rsa.PrivateKey{"b": keyB})
+	failingServer.serve(nil)
+	handler.(*JwtPlugin).keyStore.fetchKeys()
+
+	cases := []struct {
+		name       string
+		kid        string
+		privateKey *rsa.PrivateKey
+		wantStatus int
+	}{
+		{"key that the endpoint no longer serves", "a", keyA, http.StatusUnauthorized},
+		{"key that the endpoint serves now", "b", keyB, http.StatusOK},
+		{"key of the endpoint whose fetch failed", "c", keyC, http.StatusOK},
+		{"static key", "", testPrivateKey, http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if status := serveTestRequest(t, handler, createJwksTestToken(t, c.kid, c.privateKey)); status != c.wantStatus {
+				t.Fatalf("Expected status %d, got %d", c.wantStatus, status)
+			}
+		})
+	}
+}
+
+// TestJwksRefreshReachesEveryInstanceOfAMiddleware checks that the instances that Traefik builds for the routers of one middleware share its keys, so that a refresh through one of them stops the removed key and lets the new key pass on the other one too.
+func TestJwksRefreshReachesEveryInstanceOfAMiddleware(t *testing.T) {
+	keyA := generateTestPrivateKey()
+	keyB := generateTestPrivateKey()
+	server := startJwksTestServer(t, map[string]*rsa.PrivateKey{"a": keyA})
+	cfg := Config{
+		Keys:             []string{server.URL},
+		ExpectedAudience: testAudience,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
+
+	firstRouterHandler, err := New(ctx, next, &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRouterHandler, err := New(ctx, next, &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTestKey(t, firstRouterHandler, "a")
+	if status := serveTestRequest(t, firstRouterHandler, createJwksTestToken(t, "a", keyA)); status != http.StatusOK {
+		t.Fatalf("Expected the token of key a to pass on the first router before the rotation, got status %d", status)
+	}
+
+	server.serve(map[string]*rsa.PrivateKey{"b": keyB})
+	secondRouterHandler.(*JwtPlugin).keyStore.fetchKeys()
+
+	if status := serveTestRequest(t, firstRouterHandler, createJwksTestToken(t, "a", keyA)); status != http.StatusUnauthorized {
+		t.Fatalf("Expected the token of the removed key a to be rejected on the first router, got status %d", status)
+	}
+	if status := serveTestRequest(t, firstRouterHandler, createJwksTestToken(t, "b", keyB)); status != http.StatusOK {
+		t.Fatalf("Expected the token of the new key b to pass on the first router, got status %d", status)
+	}
+}
+
+// TestForcedJwksRefreshAfterAReloadDoesNotBlock checks that an instance from before a configuration reload still finishes a forced refresh. Traefik v3.7.10 cancels the context of the previous build on a reload, which stops the background refresh of its keyStore, so the instance fetches the keys itself instead of waiting for the stopped refresh.
+func TestForcedJwksRefreshAfterAReloadDoesNotBlock(t *testing.T) {
+	keyA := generateTestPrivateKey()
+	keyB := generateTestPrivateKey()
+	server := startJwksTestServer(t, map[string]*rsa.PrivateKey{"a": keyA})
+	cfg := Config{
+		Keys:             []string{server.URL},
+		ForceRefreshKeys: true,
+		ExpectedAudience: testAudience,
+	}
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
+
+	previousCtx, cancelPrevious := context.WithCancel(context.Background())
+	previousHandler, err := New(previousCtx, next, &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTestKey(t, previousHandler, "a")
+	cancelPrevious()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	currentHandler, err := New(ctx, next, &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentHandler.(*JwtPlugin).keyStore == previousHandler.(*JwtPlugin).keyStore {
+		t.Fatal("Expected the reload to create a new keyStore instead of reusing the stopped one")
+	}
+
+	server.serve(map[string]*rsa.PrivateKey{"b": keyB})
+
+	if status := serveTestRequest(t, previousHandler, createJwksTestToken(t, "b", keyB)); status != http.StatusOK {
+		t.Fatalf("Expected the forced refresh to fetch key b, got status %d", status)
+	}
+}
+
+// TestForcedJwksRefreshWaitsAtMostTheFetchTimeout checks that a forced refresh against an endpoint that accepts the connection but never answers holds the request for about keysFetchTimeout and no longer, and that the request then goes on with the keys it has.
+func TestForcedJwksRefreshWaitsAtMostTheFetchTimeout(t *testing.T) {
+	keyA := generateTestPrivateKey()
+	server := startJwksTestServer(t, map[string]*rsa.PrivateKey{"a": keyA})
+	server.hang()
+	cfg := Config{
+		Keys:             []string{server.URL},
+		ForceRefreshKeys: true,
+		ExpectedAudience: testAudience,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler, err := New(ctx, http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {}), &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	status := serveTestRequest(t, handler, createJwksTestToken(t, "a", keyA))
+	elapsed := time.Since(startedAt)
+
+	if status != http.StatusUnauthorized {
+		t.Fatalf("Expected the token to be rejected without keys, got status %d", status)
+	}
+	if elapsed > keysFetchTimeout+2*time.Second {
+		t.Fatalf("Expected the request to wait about %s at most, but it waited %s", keysFetchTimeout, elapsed)
+	}
+}
+
+// TestFailedJwksFetchIsRetriedInTheBackground checks that requests after a failed fetch never wait for a key fetch. They go on with the keys they have and start at most one fetch in the background, none within failedFetchRetryInterval of the last one, and the fetch that a request starts after the endpoint recovers loads its keys.
+func TestFailedJwksFetchIsRetriedInTheBackground(t *testing.T) {
+	keyA := generateTestPrivateKey()
+	server := startJwksTestServer(t, nil)
+	cfg := Config{
+		Keys:             []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey), server.URL},
+		ExpectedAudience: testAudience,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	handler, err := New(ctx, http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {}), &cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := handler.(*JwtPlugin).keyStore
+	isFailedAndIdle := func() bool {
+		store.keysLock.RLock()
+		defer store.keysLock.RUnlock()
+		return store.lastFetchFailed && !store.fetchInFlight
+	}
+	// Moving the start of the last fetch back by the interval lets the next request start a retry without the test waiting for the interval.
+	allowRetry := func() {
+		store.keysLock.Lock()
+		defer store.keysLock.Unlock()
+		store.lastFetchStartedAt = time.Now().Add(-failedFetchRetryInterval)
+	}
+	staticKeyToken := createJwksTestToken(t, "", testPrivateKey)
+	waitForTestCondition(t, "the first fetch to fail", isFailedAndIdle)
+
+	server.hang()
+	allowRetry()
+	requestCountBefore := server.requestCount()
+	statuses := make([]int, 50)
+	var wait sync.WaitGroup
+	startedAt := time.Now()
+	for index := range statuses {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			req := httptest.NewRequest(http.MethodGet, "http://localhost", nil)
+			req.Header["Authorization"] = []string{"Bearer " + staticKeyToken}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			statuses[index] = recorder.Code
+		}(index)
+	}
+	served := make(chan struct{})
+	go func() {
+		wait.Wait()
+		close(served)
+	}()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Expected the requests to finish within ten seconds")
+	}
+	if elapsed := time.Since(startedAt); elapsed >= keysFetchTimeout {
+		t.Fatalf("Expected the requests not to wait for the fetch, but they took %s", elapsed)
+	}
+	for index, status := range statuses {
+		if status != http.StatusOK {
+			t.Fatalf("Expected request %d to pass with the static key, got status %d", index, status)
+		}
+	}
+	waitForTestCondition(t, "the requests to start a fetch", func() bool { return server.requestCount() > requestCountBefore })
+
+	// Fetches run one at a time, so the fetches that the requests started are only counted once the hanging one has ended.
+	server.serve(map[string]*rsa.PrivateKey{"a": keyA})
+	waitForTestCondition(t, "the started fetches to end", func() bool {
+		store.keysLock.RLock()
+		defer store.keysLock.RUnlock()
+		return !store.fetchInFlight
+	})
+	time.Sleep(100 * time.Millisecond)
+	if count := server.requestCount() - requestCountBefore; count != 1 {
+		t.Fatalf("Expected the requests to start one fetch, got %d", count)
+	}
+	if !isFailedAndIdle() {
+		t.Fatal("Expected the fetch that never got an answer to count as failed")
+	}
+	if status := serveTestRequest(t, handler, staticKeyToken); status != http.StatusOK {
+		t.Fatalf("Expected the static key to pass, got status %d", status)
+	}
+	if !isFailedAndIdle() {
+		t.Fatal("Expected no retry within failedFetchRetryInterval of the last fetch")
+	}
+	allowRetry()
+	if status := serveTestRequest(t, handler, staticKeyToken); status != http.StatusOK {
+		t.Fatalf("Expected the static key to pass, got status %d", status)
+	}
+	waitForTestKey(t, handler, "a")
+	if status := serveTestRequest(t, handler, createJwksTestToken(t, "a", keyA)); status != http.StatusOK {
+		t.Fatalf("Expected key a of the recovered endpoint to pass, got status %d", status)
 	}
 }
 
@@ -1317,17 +1566,6 @@ func TestJwksHeaders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{
-				JwksHeaders:      tt.jwksHeaders,
-				ExpectedAudience: testAudience,
-			}
-			ctx := context.Background()
-
-			jwtPlugin, err := New(ctx, nil, &cfg, "test-traefik-jwt-plugin")
-			if err != nil {
-				t.Fatal(err)
-			}
-
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				for key, val := range tt.expected {
 					if r.Header.Get(key) != val {
@@ -1336,20 +1574,22 @@ func TestJwksHeaders(t *testing.T) {
 				}
 			}))
 			defer ts.Close()
+			cfg := Config{
+				Keys:             []string{ts.URL},
+				JwksHeaders:      tt.jwksHeaders,
+				ExpectedAudience: testAudience,
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-			jwtPlugin.(*JwtPlugin).jwkEndpoints = append(jwtPlugin.(*JwtPlugin).jwkEndpoints, mustParseUrl(ts.URL))
+			jwtPlugin, err := New(ctx, nil, &cfg, "test-traefik-jwt-plugin")
+			if err != nil {
+				t.Fatal(err)
+			}
 
-			jwtPlugin.(*JwtPlugin).FetchKeys()
+			jwtPlugin.(*JwtPlugin).keyStore.fetchKeys()
 		})
 	}
-}
-
-func mustParseUrl(urlStr string) *url.URL {
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		panic(err)
-	}
-	return u
 }
 
 // A client must never be able to forge a jwtHeaders header (e.g. X-Account-Role).
@@ -1697,6 +1937,103 @@ func createUnsignedTestToken(t *testing.T, payload map[string]interface{}) strin
 // createJohnDoeTestPayload returns the claims of the jwt.io sample token plus the test audience, because a token without a configured audience is rejected.
 func createJohnDoeTestPayload() map[string]interface{} {
 	return map[string]interface{}{"sub": "1234567890", "name": "John Doe", "admin": true, "iat": 1516239022, "aud": testAudience}
+}
+
+// createJwksTestToken signs a token for the test audience with the key and names the key id in its header.
+func createJwksTestToken(t *testing.T, kid string, privateKey *rsa.PrivateKey) string {
+	token := createTestToken(t, map[string]interface{}{"alg": "RS256", "typ": "JWT", "kid": kid}, map[string]interface{}{"sub": "user-1", "aud": testAudience}, privateKey)
+	return token
+}
+
+// jwksTestServer is a JWK endpoint whose answer a test can change. It serves the public halves of its keys under their key ids, answers with a 500 and a JSON error body while its keys are nil, and does not answer at all while it hangs.
+type jwksTestServer struct {
+	URL         string
+	lock        sync.Mutex
+	privateKeys map[string]*rsa.PrivateKey
+	hangCh      chan struct{}
+	requests    int
+}
+
+// startJwksTestServer starts a jwksTestServer that serves the keys.
+func startJwksTestServer(t *testing.T, privateKeys map[string]*rsa.PrivateKey) *jwksTestServer {
+	jwksServer := &jwksTestServer{privateKeys: privateKeys}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jwksServer.lock.Lock()
+		jwksServer.requests++
+		hangCh := jwksServer.hangCh
+		served := jwksServer.privateKeys
+		jwksServer.lock.Unlock()
+		if hangCh != nil {
+			select {
+			case <-hangCh:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		if served == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprintln(w, `{"error":"unavailable"}`)
+			return
+		}
+		keys := []map[string]string{}
+		for kid, privateKey := range served {
+			keys = append(keys, map[string]string{"kty": "RSA", "kid": kid, "alg": "RS256", "n": base64.RawURLEncoding.EncodeToString(privateKey.N.Bytes()), "e": "AQAB"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"keys": keys})
+	}))
+	// Cleanups run in reverse order, so the hanging requests end before the server waits for them to close.
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { jwksServer.serve(nil) })
+	jwksServer.URL = server.URL
+	return jwksServer
+}
+
+// serve makes the endpoint serve the keys, and nil makes it answer with a 500. Requests that hang end without an answer.
+func (jwksServer *jwksTestServer) serve(privateKeys map[string]*rsa.PrivateKey) {
+	jwksServer.lock.Lock()
+	defer jwksServer.lock.Unlock()
+	if jwksServer.hangCh != nil {
+		close(jwksServer.hangCh)
+		jwksServer.hangCh = nil
+	}
+	jwksServer.privateKeys = privateKeys
+}
+
+// hang makes the endpoint accept requests and never answer them.
+func (jwksServer *jwksTestServer) hang() {
+	jwksServer.lock.Lock()
+	defer jwksServer.lock.Unlock()
+	if jwksServer.hangCh == nil {
+		jwksServer.hangCh = make(chan struct{})
+	}
+}
+
+// requestCount returns how many requests the endpoint received.
+func (jwksServer *jwksTestServer) requestCount() int {
+	jwksServer.lock.Lock()
+	defer jwksServer.lock.Unlock()
+	return jwksServer.requests
+}
+
+// waitForTestCondition waits until the condition holds, and fails the test when it does not after ten seconds.
+func waitForTestCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("Expected %s within ten seconds", description)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForTestKey waits until a fetch of the middleware has loaded the key.
+func waitForTestKey(t *testing.T, handler http.Handler, kid string) {
+	t.Helper()
+	waitForTestCondition(t, "a fetch to load key "+kid, func() bool {
+		_, ok := handler.(*JwtPlugin).keyStore.getKeysSync()[kid]
+		return ok
+	})
 }
 
 // serveTestRequest sends a request with the token through the middleware and returns the status of the response. It fails the test when the request does not finish within ten seconds, so that a request that waits forever for a refresh fails the test instead of hanging it.

@@ -52,7 +52,7 @@ OpaBody | Boolean indicating whether the request body should be added to the OPA
 OpaDebugMode | Set the opa response in the http response body when the request isn't allowed otherwise the response body is `forbidden`
 PayloadFields | The field-name in the JWT payload that are required (e.g. `exp`). Multiple field names may be specified (string array)
 Required | Is `Authorization` header with JWT token required for every request.
-Keys | Used to validate JWT signature. Multiple keys are supported. Allowed values include certificates, public keys, symmetric keys. In case the value is a valid URL, the plugin will fetch keys from the JWK endpoint.
+Keys | Used to validate JWT signature. Multiple keys are supported. Allowed values include certificates, public keys, symmetric keys. In case the value is a valid URL, the plugin will fetch keys from the JWK endpoint. A successful fetch replaces the keys that the endpoint returned before, so a key that it no longer returns stops being trusted. When a fetch fails, the plugin keeps the keys of that endpoint's last successful fetch. A request to a JWK endpoint times out after 5 seconds, and after a failed fetch the requests start at most one new fetch every 10 seconds in the background instead of waiting for it.
 ForceRefreshKeys | Force fetching keys from JWKS service when the key of current JWT token is not found. If set false, keys will only be refreshed every 15 minutes by default.
 Alg | Used to verify which PKI algorithm is used in the JWT.
 ExpectedIssuer | Value the `iss` claim of the JWT must equal. If empty, the issuer is not checked.
