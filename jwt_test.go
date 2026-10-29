@@ -3,8 +3,14 @@ package my_traefik_jwt_plugin
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -1406,4 +1412,157 @@ func TestAudienceContains(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestServeHTTPExpectedAudiencesSigned runs signed tokens through ServeHTTP with Keys set, as in production, so the aud claim is decoded with UseNumber and a number arrives as json.Number. A valid token passes with each form in which Traefik hands the audiences to the plugin: a YAML list, a comma-separated string, which Traefik's mapstructure.StringToSliceHookFunc(",") splits without trimming, and a single value next to a list. The other cases show the order of the checks, which is the signature, the issuer, the audience and then the exp claim, and that only string values of the aud claim count.
+func TestServeHTTPExpectedAudiencesSigned(t *testing.T) {
+	const issuer = "https://auth.example.test/application/o/neurapolis-app/"
+	otherPrivateKey := generateTestPrivateKey()
+	validExp := time.Now().Add(5 * time.Minute).Unix()
+	expiredExp := time.Now().Add(-5 * time.Minute).Unix()
+
+	cases := []struct {
+		name              string
+		expectedAudience  string
+		expectedAudiences []string
+		signingKey        *rsa.PrivateKey
+		iss               string
+		aud               interface{}
+		exp               int64
+		wantErrorType     string
+	}{
+		{"YAML list passes an array aud", "", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, []interface{}{"other", "neuraplex"}, validExp, ""},
+		{"comma-separated string with spaces passes", "", strings.Split("neurapolis-app, neuraplex", ","), testPrivateKey, issuer, "neuraplex", validExp, ""},
+		{"single value next to a list passes the single value", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "neurapolis-app", validExp, ""},
+		{"other signing key rejected before the issuer and the audience", "neurapolis-app", []string{"neuraplex"}, otherPrivateKey, "https://other.example.test/", "librechat", validExp, ErrorTypeUnauthenticatedJwtSignatureInvalid},
+		{"other issuer rejected before the audience", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, "https://auth.example.test/application/o/neuraplex/", "librechat", validExp, ErrorTypeUnauthenticatedJwtIssuerInvalid},
+		{"other audience rejected", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "librechat", validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"expired token with another audience rejected for the audience before the exp claim", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "librechat", expiredExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"expired token with an audience of the list rejected as expired", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, "neuraplex", expiredExp, ErrorTypeUnauthenticatedJwtExpired},
+		{"missing audience rejected", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, nil, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"numeric aud never matches its formatted form", "42", nil, testPrivateKey, issuer, 42, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"numeric aud entry never matches its formatted form", "42", nil, testPrivateKey, issuer, []interface{}{42}, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"string aud entry next to a numeric entry passes", "neurapolis-app", []string{"neuraplex"}, testPrivateKey, issuer, []interface{}{42, "neuraplex"}, validExp, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{
+				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+				ExpectedIssuer:    issuer,
+				ExpectedAudience:  c.expectedAudience,
+				ExpectedAudiences: c.expectedAudiences,
+				PayloadFields:     []string{"exp"},
+				JwtHeaders:        map[string]string{"X-Account-Id": "sub"},
+			}
+			ctx := context.Background()
+			nextCalled := false
+			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
+
+			jwt, err := New(ctx, next, &cfg, "test-traefik-jwt-plugin")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			recorder := httptest.NewRecorder()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := map[string]interface{}{"sub": "user-1", "iss": c.iss, "exp": c.exp}
+			if c.aud != nil {
+				payload["aud"] = c.aud
+			}
+			req.Header["Authorization"] = []string{"Bearer " + createSignedTestToken(t, c.signingKey, payload)}
+
+			jwt.ServeHTTP(recorder, req)
+
+			if c.wantErrorType == "" {
+				if !nextCalled {
+					t.Fatalf("Expected next.ServeHTTP to be called, got status %d and body %s", recorder.Code, recorder.Body.String())
+				}
+				if req.Header.Get("X-Account-Id") != "user-1" {
+					t.Fatalf("Expected header X-Account-Id:user-1, got %q", req.Header.Get("X-Account-Id"))
+				}
+				return
+			}
+			if nextCalled {
+				t.Fatal("Expected next.ServeHTTP not to be called")
+			}
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("Expected status code %d, got %d", http.StatusUnauthorized, recorder.Code)
+			}
+			if !strings.Contains(recorder.Body.String(), c.wantErrorType) {
+				t.Fatalf("Expected body to contain %s, got %s", c.wantErrorType, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// testPrivateKey signs the tokens of the tests that need a valid signature but no key of their own.
+var testPrivateKey = generateTestPrivateKey()
+
+// generateTestPrivateKey generates an RSA key that a test signs its tokens with.
+func generateTestPrivateKey() *rsa.PrivateKey {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	return privateKey
+}
+
+// createTestPublicKeyPem encodes the public key in the PEM form that the Keys setting accepts.
+func createTestPublicKeyPem(t *testing.T, publicKey interface{}) string {
+	publicKeyDer, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicKeyDer}))
+}
+
+// createTestToken encodes the header and the payload and signs them with the key, using the algorithm that the alg header names. The tests generate their keys, so a token can carry the claims that a test needs.
+func createTestToken(t *testing.T, header, payload map[string]interface{}, key interface{}) string {
+	headerJson, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadJson, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingInput := base64.RawURLEncoding.EncodeToString(headerJson) + "." + base64.RawURLEncoding.EncodeToString(payloadJson)
+	algorithmName := fmt.Sprint(header["alg"])
+	algorithm, ok := tokenAlgorithms[algorithmName]
+	if !ok {
+		t.Fatalf("Unknown algorithm %s", algorithmName)
+	}
+	digest := algorithm.hash.New()
+	_, _ = digest.Write([]byte(signingInput))
+	var signature []byte
+	switch algorithmName[:2] {
+	case "RS":
+		signature, err = rsa.SignPKCS1v15(rand.Reader, key.(*rsa.PrivateKey), algorithm.hash, digest.Sum(nil))
+	case "PS":
+		signature, err = rsa.SignPSS(rand.Reader, key.(*rsa.PrivateKey), algorithm.hash, digest.Sum(nil), nil)
+	case "ES":
+		ecdsaKey := key.(*ecdsa.PrivateKey)
+		r, s, signErr := ecdsa.Sign(rand.Reader, ecdsaKey, digest.Sum(nil))
+		err = signErr
+		size := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+		signature = append(r.FillBytes(make([]byte, size)), s.FillBytes(make([]byte, size))...)
+	case "HS":
+		mac := hmac.New(algorithm.hash.New, key.([]byte))
+		_, _ = mac.Write([]byte(signingInput))
+		signature = mac.Sum(nil)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+// createSignedTestToken signs the payload with the key using RS256.
+func createSignedTestToken(t *testing.T, privateKey *rsa.PrivateKey, payload map[string]interface{}) string {
+	token := createTestToken(t, map[string]interface{}{"alg": "RS256", "typ": "JWT"}, payload, privateKey)
+	return token
 }

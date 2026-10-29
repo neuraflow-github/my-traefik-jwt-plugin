@@ -55,6 +55,9 @@ Required | Is `Authorization` header with JWT token required for every request.
 Keys | Used to validate JWT signature. Multiple keys are supported. Allowed values include certificates, public keys, symmetric keys. In case the value is a valid URL, the plugin will fetch keys from the JWK endpoint.
 ForceRefreshKeys | Force fetching keys from JWKS service when the key of current JWT token is not found. If set false, keys will only be refreshed every 15 minutes by default.
 Alg | Used to verify which PKI algorithm is used in the JWT.
+ExpectedIssuer | Value the `iss` claim of the JWT must equal. If empty, the issuer is not checked.
+ExpectedAudience | Audience the `aud` claim of the JWT (a string or an array of strings) must contain, combined with `ExpectedAudiences`. Empty or omitted means not set. See [Audience check](#audience-check).
+ExpectedAudiences | List of accepted audiences (string array, or a comma-separated string), combined with `ExpectedAudience`. The JWT passes when its `aud` claim (a string or an array of strings) contains at least one of them. See [Audience check](#audience-check).
 JwksHeaders | Map used to add headers to a JWKS request (e.g. credentials for a 3rd party JWKS service).
 JwtHeaders | Map used to inject JWT payload fields as HTTP request headers.
 OpaHeaders | Map used to inject OPA result fields as HTTP request headers. Populated if request is allowed by OPA. Only 1st level keys from OPA document are supported.
@@ -63,6 +66,13 @@ OpaHttpStatusField | Field in OPA JSON result, which contains int or string HTTP
 JwtCookieKey | (Deprecated, use JwtSources)Name of the cookie to extract JWT if not found in `Authorization` header.
 JwtQueryKey | (Deprecated, use JwtSources) Name of the query parameter to extract JWT if not found in `Authorization` header or in the specified cookie.
 JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT. config format is a list of maps e.g. [{type: bearer, key: Authorization}, {type: query, key, jwt}]
+
+### Audience check
+
+`ExpectedAudience` and `ExpectedAudiences` are merged into one list of accepted audiences. A token passes when its `aud` claim contains at least one of them. Only string values in the claim count, so a number, a nested array or an object never matches. The check runs after the signature and issuer checks and before the `PayloadFields` checks such as `exp`.
+
+- Every value is trimmed of surrounding whitespace. Traefik splits a comma-separated string such as `"neurapolis-app, neuraplex"` into a list without trimming, so the trimming makes that form work. This changes how a value with surrounding whitespace behaves: in v1.0.9 `" neurapolis-app"` rejected every token, now it matches `neurapolis-app`.
+- A value that is blank after trimming is left out. With no audience left, the audience is not checked.
 
 
 ### Example configuration

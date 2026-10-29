@@ -76,6 +76,7 @@ type Config struct {
 	Alg                string
 	ExpectedIssuer     string
 	ExpectedAudience   string
+	ExpectedAudiences  []string
 	OpaHeaders         map[string]string
 	JwtHeaders         map[string]string
 	JwksHeaders        map[string]string
@@ -109,7 +110,7 @@ type JwtPlugin struct {
 	keys               map[string]interface{}
 	alg                string
 	expectedIssuer     string
-	expectedAudience   string
+	expectedAudiences  []string
 	opaHeaders         map[string]string
 	jwtHeaders         map[string]string
 	jwksHeaders        map[string]string
@@ -213,6 +214,7 @@ type Response struct {
 
 // New creates a new plugin
 func New(ctx context.Context, next http.Handler, config *Config, pluginName string) (http.Handler, error) {
+	expectedAudiences := mergeExpectedAudiences(config.ExpectedAudience, config.ExpectedAudiences)
 	jwtPlugin := &JwtPlugin{
 		httpClient:         &http.Client{},
 		next:               next,
@@ -224,7 +226,7 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		required:           config.Required,
 		alg:                config.Alg,
 		expectedIssuer:     config.ExpectedIssuer,
-		expectedAudience:   config.ExpectedAudience,
+		expectedAudiences:  expectedAudiences,
 		keys:               make(map[string]interface{}),
 		opaHeaders:         config.OpaHeaders,
 		jwtHeaders:         config.JwtHeaders,
@@ -486,14 +488,38 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 	jwtPlugin.next.ServeHTTP(rw, request)
 }
 
-// audienceContains reports whether the aud claim carries the expected audience. The claim is a single string for one audience or an array of strings for several, so both shapes are handled.
+// mergeExpectedAudiences combines the single ExpectedAudience with the ExpectedAudiences list into one list of values trimmed of surrounding whitespace. Traefik decodes a comma-separated string into the list without trimming, so "a, b" arrives as "a" and " b". A value that is blank after trimming is left out.
+func mergeExpectedAudiences(expectedAudience string, expectedAudiences []string) []string {
+	merged := make([]string, 0, len(expectedAudiences)+1)
+	if trimmed := strings.TrimSpace(expectedAudience); trimmed != "" {
+		merged = append(merged, trimmed)
+	}
+	for _, audience := range expectedAudiences {
+		if trimmed := strings.TrimSpace(audience); trimmed != "" {
+			merged = append(merged, trimmed)
+		}
+	}
+	return merged
+}
+
+// audienceContainsAny reports whether the aud claim carries at least one of the expected audiences.
+func audienceContainsAny(audClaim interface{}, expectedAudiences []string) bool {
+	for _, expected := range expectedAudiences {
+		if audienceContains(audClaim, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+// audienceContains reports whether the aud claim carries the expected audience. The claim is a single string for one audience or an array of strings for several, so both shapes are handled. Only string values count, so a number, a nested array or an object never matches, not even an expected audience that looks like its formatted form.
 func audienceContains(audClaim interface{}, expected string) bool {
 	switch aud := audClaim.(type) {
 	case string:
 		return aud == expected
 	case []interface{}:
 		for _, entry := range aud {
-			if fmt.Sprint(entry) == expected {
+			if entryString, ok := entry.(string); ok && entryString == expected {
 				return true
 			}
 		}
@@ -551,15 +577,17 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtIssuerInvalid, nil)
 			}
 		}
-		if jwtPlugin.expectedAudience != "" {
-			if !audienceContains(jwtToken.Payload["aud"], jwtPlugin.expectedAudience) {
-				logError(fmt.Sprintf("Token audience %q does not contain expected audience", jwtToken.Payload["aud"])).
-					withSub(sub).
-					withUrl(request.URL.String()).
-					withNetwork(jwtPlugin.remoteAddr(request)).
-					print()
-				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtAudienceInvalid, nil)
+		if len(jwtPlugin.expectedAudiences) > 0 && !audienceContainsAny(jwtToken.Payload["aud"], jwtPlugin.expectedAudiences) {
+			message := fmt.Sprintf("Token audience %q does not contain any of the expected audiences %q", jwtToken.Payload["aud"], jwtPlugin.expectedAudiences)
+			if jwtToken.Payload["aud"] == nil {
+				message = fmt.Sprintf("Token has no aud claim, expected one of the audiences %q", jwtPlugin.expectedAudiences)
 			}
+			logError(message).
+				withSub(sub).
+				withUrl(request.URL.String()).
+				withNetwork(jwtPlugin.remoteAddr(request)).
+				print()
+			return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtAudienceInvalid, nil)
 		}
 		for _, fieldName := range jwtPlugin.payloadFields {
 			_, ok := jwtToken.Payload[fieldName]
