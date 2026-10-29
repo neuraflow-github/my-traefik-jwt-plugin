@@ -42,7 +42,7 @@ traefik \
 
 ## Configuration
 
-The plugin currently supports the following configuration settings: (all fields are optional)
+The plugin currently supports the following configuration settings: (all fields are optional except `ExpectedAudiences`)
 
 Name | Description
 ---- | ----
@@ -55,6 +55,8 @@ Required | Is `Authorization` header with JWT token required for every request.
 Keys | Used to validate JWT signature. Multiple keys are supported. Allowed values include certificates, public keys, symmetric keys. In case the value is a valid URL, the plugin will fetch keys from the JWK endpoint.
 ForceRefreshKeys | Force fetching keys from JWKS service when the key of current JWT token is not found. If set false, keys will only be refreshed every 15 minutes by default.
 Alg | Used to verify which PKI algorithm is used in the JWT.
+ExpectedIssuer | Value the `iss` claim of the JWT must equal. If empty, the issuer is not checked.
+ExpectedAudiences | List of accepted audiences (string array, or a comma-separated string), at least one. The JWT passes when its `aud` claim (a string or an array of strings) contains at least one of them. See [Audience check](#audience-check).
 JwksHeaders | Map used to add headers to a JWKS request (e.g. credentials for a 3rd party JWKS service).
 JwtHeaders | Map used to inject JWT payload fields as HTTP request headers.
 OpaHeaders | Map used to inject OPA result fields as HTTP request headers. Populated if request is allowed by OPA. Only 1st level keys from OPA document are supported.
@@ -63,6 +65,24 @@ OpaHttpStatusField | Field in OPA JSON result, which contains int or string HTTP
 JwtCookieKey | (Deprecated, use JwtSources)Name of the cookie to extract JWT if not found in `Authorization` header.
 JwtQueryKey | (Deprecated, use JwtSources) Name of the query parameter to extract JWT if not found in `Authorization` header or in the specified cookie.
 JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT. config format is a list of maps e.g. [{type: bearer, key: Authorization}, {type: query, key, jwt}]
+
+### Audience check
+
+A token passes when its `aud` claim contains at least one of the `ExpectedAudiences`. Only string values in the claim count, so a number, a nested array or an object never matches. The check runs after the signature and issuer checks and before the `PayloadFields` checks such as `exp`.
+
+- An audience is mandatory, and no setting turns the check off. An omitted, `null`, `""` or `[]` `ExpectedAudiences` is a [configuration error](#configuration-errors). Traefik decodes `""` and `[]` into an empty list, and its file provider turns `[]` into `""` first.
+- Every value is trimmed of surrounding whitespace. Traefik splits a comma-separated string such as `"neurapolis-app, neuraplex"` into a list without trimming, so the trimming makes that form work.
+- An entry that is blank after trimming, for example from `[""]` or from the trailing comma in `"neurapolis-app,"`, is a configuration error.
+- A misspelled key such as `ExpectedAudences`, or the single `ExpectedAudience` of v1.0.9, is ignored, because Traefik does not reject unknown plugin settings. The middleware then has no audience, which is a configuration error.
+- v1.0.9 knows only the single `ExpectedAudience` and ignores `ExpectedAudiences`, so a rollback to v1.0.9 needs `ExpectedAudience` set again.
+
+### Configuration errors
+
+The plugin checks the audience settings when the middleware is created. A configuration error that it detects there does not stop the middleware from loading. Instead the middleware answers every request with a `500` and the error type `UNAUTHENTICATED_CONFIGURATION_INVALID`, never passes a request on, and still removes the headers named in `JwtHeaders` from the request. It is a `500` and not a `401`, because clients refresh the session and retry on a `401`. The plugin logs the error once when the middleware is created, naming the middleware, and Traefik shows it at the `ERROR` level.
+
+A middleware that fails to load would be worse. Traefik skips every router that uses it, so a request reaches the next router that matches it, which may not check a token at all. This still happens when Traefik cannot decode a setting into its type, for example a `Required` that is not a boolean, because Traefik decodes the settings before the plugin runs, and when a `Keys` entry cannot be used.
+
+The per-request logs of the plugin, such as a rejected audience, go to stdout, which Traefik only shows at the `DEBUG` level.
 
 
 ### Example configuration
@@ -83,6 +103,8 @@ spec:
       PayloadFields:
         - exp
       Required: true
+      ExpectedAudiences:
+        - example-audience
       Keys:
         - https://samples.auth0.com/.well-known/jwks.json
         - |

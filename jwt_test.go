@@ -3,10 +3,18 @@ package my_traefik_jwt_plugin
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -69,11 +77,14 @@ func TestServeHTTPOK(t *testing.T) {
 		},
 	}
 
+	token := createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, createJohnDoeTestPayload(), testPrivateKey)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Config{
-				JwtHeaders: map[string]string{"Name": "name"},
-				Keys:       []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+				JwtHeaders:        map[string]string{"Name": "name"},
+				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 			nextCalled := false
@@ -94,7 +105,7 @@ func TestServeHTTPOK(t *testing.T) {
 			if len(tt.authPrefix) > 0 {
 				authPrefix = tt.authPrefix
 			}
-			req.Header["Authorization"] = []string{fmt.Sprintf("%s eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A", authPrefix)}
+			req.Header["Authorization"] = []string{fmt.Sprintf("%s %s", authPrefix, token)}
 			if len(tt.forwardedFor) > 0 {
 				req.Header["X-Forwarded-For"] = []string{tt.forwardedFor}
 			}
@@ -221,9 +232,10 @@ func TestServeOPAWithBody(t *testing.T) {
 			}))
 			defer ts.Close()
 			cfg := Config{
-				OpaUrl:        fmt.Sprintf("%s/v1/data/testok?Param1=foo&Param1=bar", ts.URL),
-				OpaAllowField: "allow",
-				OpaBody:       tt.drainBody,
+				OpaUrl:            fmt.Sprintf("%s/v1/data/testok?Param1=foo&Param1=bar", ts.URL),
+				OpaAllowField:     "allow",
+				OpaBody:           tt.drainBody,
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -247,7 +259,7 @@ func TestServeOPAWithBody(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header["Authorization"] = []string{"Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A"}
+			req.Header["Authorization"] = []string{"Bearer " + createUnsignedTestToken(t, createJohnDoeTestPayload())}
 			req.Header["Content-Type"] = []string{tt.contentType}
 
 			jwt.ServeHTTP(recorder, req)
@@ -262,8 +274,9 @@ func TestServeOPAWithBody(t *testing.T) {
 func TestServeWithBody(t *testing.T) {
 	// TODO: add more testcases with DSA, etc.
 	cfg := Config{
-		JwtHeaders: map[string]string{"Name": "name"},
-		Keys:       []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		JwtHeaders:        map[string]string{"Name": "name"},
+		Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -287,7 +300,7 @@ func TestServeWithBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header["Authorization"] = []string{"Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A"}
+	req.Header["Authorization"] = []string{"Bearer " + createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, createJohnDoeTestPayload(), testPrivateKey)}
 	req.Header["Content-Type"] = []string{"application/json"}
 
 	jwt.ServeHTTP(recorder, req)
@@ -310,6 +323,7 @@ func TestServeGETWithContentType(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.Required = false
 	cfg.OpaUrl = ts.URL
 
@@ -339,9 +353,10 @@ func TestServeGETWithContentType(t *testing.T) {
 
 func TestServeHTTPInvalidSignature(t *testing.T) {
 	cfg := Config{
-		Required:      true,
-		PayloadFields: []string{"exp"},
-		Keys:          []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		Required:          true,
+		PayloadFields:     []string{"exp"},
+		Keys:              []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -369,9 +384,10 @@ func TestServeHTTPInvalidSignature(t *testing.T) {
 
 func TestServeHTTPMissingExp(t *testing.T) {
 	cfg := Config{
-		PayloadFields: []string{"exp"},
-		Required:      true,
-		Keys:          []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		PayloadFields:     []string{"exp"},
+		Required:          true,
+		Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -388,12 +404,15 @@ func TestServeHTTPMissingExp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header["Authorization"] = []string{"Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A"}
+	req.Header["Authorization"] = []string{"Bearer " + createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, createJohnDoeTestPayload(), testPrivateKey)}
 
 	jwt.ServeHTTP(recorder, req)
 
 	if nextCalled == true {
 		t.Fatal("next.ServeHTTP was called")
+	}
+	if !strings.Contains(recorder.Body.String(), ErrorTypeUnauthenticatedJwtFieldMissing) {
+		t.Fatalf("Expected body to contain %s, got %s", ErrorTypeUnauthenticatedJwtFieldMissing, recorder.Body.String())
 	}
 }
 
@@ -417,6 +436,7 @@ func TestServeHTTPAllowedByOPA(t *testing.T) {
 		OpaBody:            false,
 		OpaHeaders:         map[string]string{"RequestFoo": "foo", "RequestAllow": "allow", "RequestMissing": "missing"},
 		OpaResponseHeaders: map[string]string{"ResponseFoo": "foo", "ResponseAllow": "allow", "ResponseMissing": "missing"},
+		ExpectedAudiences:  []string{testAudience},
 	}
 
 	ctx := context.Background()
@@ -478,6 +498,7 @@ func TestServeHTTPForbiddenByOPA(t *testing.T) {
 		OpaBody:            false,
 		OpaHeaders:         map[string]string{"RequestFoo": "foo", "RequestAllow": "allow", "RequestMissing": "missing"},
 		OpaResponseHeaders: map[string]string{"ResponseFoo": "foo", "ResponseAllow": "allow", "ResponseMissing": "missing"},
+		ExpectedAudiences:  []string{testAudience},
 	}
 	ctx := context.Background()
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { t.Fatal("Should not chain HTTP call") })
@@ -551,6 +572,14 @@ func validateOpaResponse(t *testing.T, req *http.Request, resp *http.Response, o
 }
 
 func TestNewJWKEndpoint(t *testing.T) {
+	rsaPrivateKey := testPrivateKey
+	ecPrivateKey, err := ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaModulus := base64.RawURLEncoding.EncodeToString(rsaPrivateKey.N.Bytes())
+	ecX := base64.RawURLEncoding.EncodeToString(ecPrivateKey.X.FillBytes(make([]byte, 66)))
+	ecY := base64.RawURLEncoding.EncodeToString(ecPrivateKey.Y.FillBytes(make([]byte, 66)))
 	tests := []struct {
 		name   string
 		key    string
@@ -560,36 +589,36 @@ func TestNewJWKEndpoint(t *testing.T) {
 	}{
 		{
 			name:   "rsa",
-			key:    `{"keys":[{"alg":"RS512","e":"AQAB","n":"nzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA-kzeVOVpVWwkWdVha4s38XM_pa_yr47av7-z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr_Mrm_YtjCZVWgaOYIhwrXwKLqPr_11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0e-lf4s4OxQawWD79J9_5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWbV6L11BWkpzGXSW4Hv43qa-GSYOD2QU68Mb59oSk2OB-BtOLpJofmbGEGgvmwyCI9Mw","kty":"RSA"}]}`,
-			token:  "Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A",
+			key:    fmt.Sprintf(`{"keys":[{"alg":"RS512","e":"AQAB","n":"%s","kty":"RSA"}]}`, rsaModulus),
+			token:  "Bearer " + createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, createJohnDoeTestPayload(), rsaPrivateKey),
 			status: http.StatusOK,
 			next:   true,
 		},
 		{
 			name:   "rsapss",
-			key:    `{"keys":[{ "alg":"PS384", "kty": "RSA", "n": "nzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA-kzeVOVpVWwkWdVha4s38XM_pa_yr47av7-z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr_Mrm_YtjCZVWgaOYIhwrXwKLqPr_11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0e-lf4s4OxQawWD79J9_5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWbV6L11BWkpzGXSW4Hv43qa-GSYOD2QU68Mb59oSk2OB-BtOLpJofmbGEGgvmwyCI9Mw", "e": "AQAB" }]}`,
-			token:  "Bearer eyJhbGciOiJQUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.MqF1AKsJkijKnfqEI3VA1OnzAL2S4eIpAuievMgD3tEFyFMU67gCbg-fxsc5dLrxNwdZEXs9h0kkicJZ70mp6p5vdv-j2ycDKBWg05Un4OhEl7lYcdIsCsB8QUPmstF-lQWnNqnq3wra1GynJrOXDL27qIaJnnQKlXuayFntBF0j-82jpuVdMaSXvk3OGaOM-7rCRsBcSPmocaAO-uWJEGPw_OWVaC5RRdWDroPi4YL4lTkDEC-KEvVkqCnFm_40C-T_siXquh5FVbpJjb3W2_YvcqfDRj44TsRrpVhk6ohsHMNeUad_cxnFnpolIKnaXq_COv35e9EgeQIPAbgIeg",
+			key:    fmt.Sprintf(`{"keys":[{ "alg":"PS384", "kty": "RSA", "n": "%s", "e": "AQAB" }]}`, rsaModulus),
+			token:  "Bearer " + createTestToken(t, map[string]interface{}{"alg": "PS384", "typ": "JWT"}, createJohnDoeTestPayload(), rsaPrivateKey),
 			status: http.StatusOK,
 			next:   true,
 		},
 		{
 			name:   "ec",
-			key:    `{"keys":[{"alg":"ES512","x":"AYHOB2c_v3wWwu5ZhMMNADtzSvcFWTw2dFRJ7GlBSxGKU82_dJyE7SVHD1G7zrHWSGdUPH526rgGIMVy-VIBzKMs","y":"ib476MkyyYgPk0BXZq3mq4zImTRNuaU9slj9TVJ3ScT3L1bXwVuPJDzpr5GOFpaj-WwMAl8G7CqwoJOsW7Kddns","kty":"EC"}]}`,
-			token:  "Bearer eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCIsImtpZCI6InhaRGZacHJ5NFA5dlpQWnlHMmZOQlJqLTdMejVvbVZkbTd0SG9DZ1NOZlkifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.AP_CIMClixc5-BFflmjyh_bRrkloEvwzn8IaWJFfMz13X76PGWF0XFuhjJUjp7EYnSAgtjJ-7iJG4IP7w3zGTBk_AUdmvRCiWp5YAe8S_Hcs8e3gkeYoOxiXFZlSSAx0GfwW1cZ0r67mwGtso1I3VXGkSjH5J0Rk6809bn25GoGRjOPu",
+			key:    fmt.Sprintf(`{"keys":[{"alg":"ES512","x":"%s","y":"%s","kty":"EC"}]}`, ecX, ecY),
+			token:  "Bearer " + createTestToken(t, map[string]interface{}{"alg": "ES512", "typ": "JWT", "kid": "xZDfZpry4P9vZPZyG2fNBRj-7Lz5omVdm7tHoCgSNfY"}, createJohnDoeTestPayload(), ecPrivateKey),
 			status: http.StatusOK,
 			next:   true,
 		},
 		{
 			name:   "hmac",
 			key:    `{"keys":[{"kty":"oct","kid":"57bd26a0-6209-4a93-a688-f8752be5d191","k":"eW91ci01MTItYml0LXNlY3JldA","alg":"HS512"}]}`,
-			token:  "Bearer eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCIsImNyaXQiOlsia2lkIl0sImtpZCI6IjU3YmQyNmEwLTYyMDktNGE5My1hNjg4LWY4NzUyYmU1ZDE5MSJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.573ixRAw4I4XUFJwJGpv5dHNOGaexX5zTtF0nOQTWuU2_JyZjD-7cuMPxQUHOv8RR0kQrS0uVdo_N1lzTCPFnA",
+			token:  "Bearer " + createTestToken(t, map[string]interface{}{"alg": "HS512", "typ": "JWT", "crit": []string{"kid"}, "kid": "57bd26a0-6209-4a93-a688-f8752be5d191"}, createJohnDoeTestPayload(), []byte("your-512-bit-secret")),
 			status: http.StatusOK,
 			next:   true,
 		},
 		{
 			name:   "rsa-multiplekeys",
-			key:    `{"keys":[{"alg":"RS512","e":"AQAB","n":"nzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA-kzeVOVpVWwkWdVha4s38XM_pa_yr47av7-z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr_Mrm_YtjCZVWgaOYIhwrXwKLqPr_11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0e-lf4s4OxQawWD79J9_5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWbV6L11BWkpzGXSW4Hv43qa-GSYOD2QU68Mb59oSk2OB-BtOLpJofmbGEGgvmwyCI9Mw","kty":"RSA"},{ "alg":"PS384", "kty": "RSA", "n": "nzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA-kzeVOVpVWwkWdVha4s38XM_pa_yr47av7-z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr_Mrm_YtjCZVWgaOYIhwrXwKLqPr_11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0e-lf4s4OxQawWD79J9_5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWbV6L11BWkpzGXSW4Hv43qa-GSYOD2QU68Mb59oSk2OB-BtOLpJofmbGEGgvmwyCI9Mw", "e": "AQAB" }]}`,
-			token:  "Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A",
+			key:    fmt.Sprintf(`{"keys":[{"alg":"RS512","e":"AQAB","n":"%s","kty":"RSA"},{ "alg":"PS384", "kty": "RSA", "n": "%s", "e": "AQAB" }]}`, rsaModulus, rsaModulus),
+			token:  "Bearer " + createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, createJohnDoeTestPayload(), rsaPrivateKey),
 			status: http.StatusOK,
 			next:   true,
 		},
@@ -602,7 +631,8 @@ func TestNewJWKEndpoint(t *testing.T) {
 			}))
 			defer ts.Close()
 			cfg := Config{
-				Keys: []string{ts.URL},
+				Keys:              []string{ts.URL},
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 			nextCalled := false
@@ -637,7 +667,7 @@ func TestNewJWKEndpoint(t *testing.T) {
 
 func TestForceRefreshKeys(t *testing.T) {
 	keys := `{"keys":[{"kty":"oct","kid":"57bd26a0-6209-4a93-a688-f8752be5d191","k":"eW91ci01MTItYml0LXNlY3JldA","alg":"HS512"}]}`
-	token := "Bearer eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCIsImNyaXQiOlsia2lkIl0sImtpZCI6IjU3YmQyNmEwLTYyMDktNGE5My1hNjg4LWY4NzUyYmU1ZDE5MSJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.573ixRAw4I4XUFJwJGpv5dHNOGaexX5zTtF0nOQTWuU2_JyZjD-7cuMPxQUHOv8RR0kQrS0uVdo_N1lzTCPFnA"
+	token := "Bearer " + createTestToken(t, map[string]interface{}{"alg": "HS512", "typ": "JWT", "crit": []string{"kid"}, "kid": "57bd26a0-6209-4a93-a688-f8752be5d191"}, createJohnDoeTestPayload(), []byte("your-512-bit-secret"))
 	jwksCalledCounter := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() { jwksCalledCounter++ }()
@@ -650,8 +680,9 @@ func TestForceRefreshKeys(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := Config{
-		Keys:             []string{ts.URL},
-		ForceRefreshKeys: true,
+		Keys:              []string{ts.URL},
+		ForceRefreshKeys:  true,
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -685,8 +716,9 @@ func TestForceRefreshKeys(t *testing.T) {
 
 func TestIssue3(t *testing.T) {
 	cfg := Config{
-		JwtHeaders: map[string]string{"Subject": "sub", "User": "preferred_username"},
-		Keys:       []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		JwtHeaders:        map[string]string{"Subject": "sub", "User": "preferred_username"},
+		Keys:              []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		ExpectedAudiences: []string{"account"},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -720,8 +752,9 @@ func TestIssue3(t *testing.T) {
 
 func TestIssue13(t *testing.T) {
 	cfg := Config{
-		JwtHeaders: map[string]string{"Subject": "sub", "User": "preferred_username"},
-		Keys:       []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----", "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmDaxrT7mDmyGHZaBuwq6\nMimV2hUrOoZ86MT/dTpspnNL4DgvvUOjvkn7Oebg9kNmAxjfqDmHtqKdKvot/vZp\nJMPr/+s/haBDN3plDf3SeWOEWwFgVwkLnkOm+mCWEvhYL6bBGCcv9AwYYtyQONKg\n+2NFOVxtQVlGo1Z8xUIY4vELiUcqTjqBZPi3+CaxqWvGsh5Wg4Si84/xKx85Ah6f\nrAtPGGO8wG2Jqlw1R4ZHJmBgXtLXTeDI2zzxugI1BtcQfy5fd9PBVoEM6782km0R\nei3X8CqIMuv00O2juFh2rZxC9ENibTbdf2OueI+sbYoP1FsziruDHJRzKnm/oAVY\nDwIDAQAB\n-----END PUBLIC KEY-----"},
+		JwtHeaders:        map[string]string{"Subject": "sub", "User": "preferred_username"},
+		Keys:              []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----", "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmDaxrT7mDmyGHZaBuwq6\nMimV2hUrOoZ86MT/dTpspnNL4DgvvUOjvkn7Oebg9kNmAxjfqDmHtqKdKvot/vZp\nJMPr/+s/haBDN3plDf3SeWOEWwFgVwkLnkOm+mCWEvhYL6bBGCcv9AwYYtyQONKg\n+2NFOVxtQVlGo1Z8xUIY4vELiUcqTjqBZPi3+CaxqWvGsh5Wg4Si84/xKx85Ah6f\nrAtPGGO8wG2Jqlw1R4ZHJmBgXtLXTeDI2zzxugI1BtcQfy5fd9PBVoEM6782km0R\nei3X8CqIMuv00O2juFh2rZxC9ENibTbdf2OueI+sbYoP1FsziruDHJRzKnm/oAVY\nDwIDAQAB\n-----END PUBLIC KEY-----"},
+		ExpectedAudiences: []string{"account"},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -755,7 +788,8 @@ func TestIssue13(t *testing.T) {
 
 func TestIssue15(t *testing.T) {
 	cfg := Config{
-		JwtHeaders: map[string]string{"X-Subject": "sub", "X-Exp": "exp", "X-Email-Verified": "email_verified"},
+		JwtHeaders:        map[string]string{"X-Subject": "sub", "X-Exp": "exp", "X-Email-Verified": "email_verified"},
+		ExpectedAudiences: []string{"account"},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -802,30 +836,30 @@ func TestServeHTTPExpiration(t *testing.T) {
 		{
 			Name:   "valid",
 			Fields: []string{"exp", "nbf"},
-			Claims: fmt.Sprintf(`{"exp": %d, "nbf": %d}`, nextMinute, lastMinute),
+			Claims: fmt.Sprintf(`{"aud": %q, "exp": %d, "nbf": %d}`, testAudience, nextMinute, lastMinute),
 			err:    "",
 		},
 		{
 			Name:   "no expiration",
-			Claims: "{}",
+			Claims: fmt.Sprintf(`{"aud": %q}`, testAudience),
 			err:    "",
 		},
 		{
 			Name:   "valid - exp only",
 			Fields: []string{"exp"},
-			Claims: fmt.Sprintf(`{"exp": %d}`, nextMinute),
+			Claims: fmt.Sprintf(`{"aud": %q, "exp": %d}`, testAudience, nextMinute),
 			err:    "",
 		},
 		{
 			Name:   "expired",
 			Fields: []string{"exp"},
-			Claims: fmt.Sprintf(`{"exp": %d}`, lastMinute),
+			Claims: fmt.Sprintf(`{"aud": %q, "exp": %d}`, testAudience, lastMinute),
 			err:    `{"type":"UNAUTHENTICATED_JWT_EXPIRED","details":null,"custom_message":null}`,
 		},
 		{
 			Name:   "not yet valid",
 			Fields: []string{"exp", "nbf"},
-			Claims: fmt.Sprintf(`{"exp": %d, "nbf": %d}`, nextMinute, nextMinute),
+			Claims: fmt.Sprintf(`{"aud": %q, "exp": %d, "nbf": %d}`, testAudience, nextMinute, nextMinute),
 			err:    `{"type":"UNAUTHENTICATED_JWT_NOT_YET_VALID","details":null,"custom_message":null}`,
 		},
 	}
@@ -836,7 +870,7 @@ func TestServeHTTPExpiration(t *testing.T) {
 			nextCalled := false
 			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
 
-			jwt, err := New(ctx, next, &Config{PayloadFields: tt.Fields}, "test-traefik-jwt-plugin")
+			jwt, err := New(ctx, next, &Config{PayloadFields: tt.Fields, ExpectedAudiences: []string{testAudience}}, "test-traefik-jwt-plugin")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -872,10 +906,11 @@ func TestServeHTTPJwtRequired(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := Config{
-		OpaAllowField: "allow",
-		Required:      true,
-		OpaUrl:        ts.URL,
-		OpaBody:       false,
+		OpaAllowField:     "allow",
+		Required:          true,
+		OpaUrl:            ts.URL,
+		OpaBody:           false,
+		ExpectedAudiences: []string{testAudience},
 	}
 
 	ctx := context.Background()
@@ -971,6 +1006,7 @@ func TestServeHTTPStatusFromOPA(t *testing.T) {
 				OpaUrl:             ts.URL,
 				OpaBody:            false,
 				OpaHttpStatusField: tt.opaHttpStatusField,
+				ExpectedAudiences:  []string{testAudience},
 			}
 
 			ctx := context.Background()
@@ -1005,6 +1041,7 @@ func TestServeHTTPStatusFromOPA(t *testing.T) {
 
 func TestTokenFromCookieConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtCookieKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1022,7 +1059,7 @@ func TestTokenFromCookieConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req.AddCookie(&http.Cookie{Name: "jwt", Value: "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.TnHVsM5_N0SKi_HCwlz3ys1cDktu10g_sKkjqzVe5k09z-bmByflWPFWjAbwgRCKAc77kF8BjDNv0gisAPurBxgxNGxioDFehhcb0IS0YeCAWpzRfBMT6gQZ1gZeNM2Dg_yf4shPhF4rcUCGqnFFzIDSU9Rv2NNMK5DPO4512uTxAQUMHpi5PGTki-zykqTB10Ju1L4jRhmJwJDtGcfdHPlEKKUrFPfYl3RPZLOfdyAqSJ8Gi0R3ymDffmXHz08AJUAY_Kapk8laggIYcvFJhYGJBWZpcy7NWMiOIjEI3bogki4o7z0-Z1xMZdZ9rqypQ1MB44F8VZS2KkPfEmhSog"})
+	req.AddCookie(&http.Cookie{Name: "jwt", Value: createUnsignedTestToken(t, createJohnDoeTestPayload())})
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1033,6 +1070,7 @@ func TestTokenFromCookieConfigured(t *testing.T) {
 
 func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtCookieKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1069,6 +1107,7 @@ func TestTokenFromCookieConfiguredButNotSet(t *testing.T) {
 
 func TestTokenFromCookieNotConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	ctx := context.Background()
 	nextCalled := false
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
@@ -1085,7 +1124,7 @@ func TestTokenFromCookieNotConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req.AddCookie(&http.Cookie{Name: "jwt", Value: "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.TnHVsM5_N0SKi_HCwlz3ys1cDktu10g_sKkjqzVe5k09z-bmByflWPFWjAbwgRCKAc77kF8BjDNv0gisAPurBxgxNGxioDFehhcb0IS0YeCAWpzRfBMT6gQZ1gZeNM2Dg_yf4shPhF4rcUCGqnFFzIDSU9Rv2NNMK5DPO4512uTxAQUMHpi5PGTki-zykqTB10Ju1L4jRhmJwJDtGcfdHPlEKKUrFPfYl3RPZLOfdyAqSJ8Gi0R3ymDffmXHz08AJUAY_Kapk8laggIYcvFJhYGJBWZpcy7NWMiOIjEI3bogki4o7z0-Z1xMZdZ9rqypQ1MB44F8VZS2KkPfEmhSog"})
+	req.AddCookie(&http.Cookie{Name: "jwt", Value: createUnsignedTestToken(t, createJohnDoeTestPayload())})
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1096,6 +1135,7 @@ func TestTokenFromCookieNotConfigured(t *testing.T) {
 
 func TestTokenFromQueryConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtQueryKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1113,7 +1153,7 @@ func TestTokenFromQueryConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := req.URL.Query()
-	query.Add("jwt", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.TnHVsM5_N0SKi_HCwlz3ys1cDktu10g_sKkjqzVe5k09z-bmByflWPFWjAbwgRCKAc77kF8BjDNv0gisAPurBxgxNGxioDFehhcb0IS0YeCAWpzRfBMT6gQZ1gZeNM2Dg_yf4shPhF4rcUCGqnFFzIDSU9Rv2NNMK5DPO4512uTxAQUMHpi5PGTki-zykqTB10Ju1L4jRhmJwJDtGcfdHPlEKKUrFPfYl3RPZLOfdyAqSJ8Gi0R3ymDffmXHz08AJUAY_Kapk8laggIYcvFJhYGJBWZpcy7NWMiOIjEI3bogki4o7z0-Z1xMZdZ9rqypQ1MB44F8VZS2KkPfEmhSog")
+	query.Add("jwt", createUnsignedTestToken(t, createJohnDoeTestPayload()))
 	req.URL.RawQuery = query.Encode()
 
 	jwt.ServeHTTP(recorder, req)
@@ -1125,6 +1165,7 @@ func TestTokenFromQueryConfigured(t *testing.T) {
 
 func TestTokenFromQueryNotConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	ctx := context.Background()
 	nextCalled := false
 	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
@@ -1142,7 +1183,7 @@ func TestTokenFromQueryNotConfigured(t *testing.T) {
 	}
 
 	query := req.URL.Query()
-	query.Add("jwt", "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.TnHVsM5_N0SKi_HCwlz3ys1cDktu10g_sKkjqzVe5k09z-bmByflWPFWjAbwgRCKAc77kF8BjDNv0gisAPurBxgxNGxioDFehhcb0IS0YeCAWpzRfBMT6gQZ1gZeNM2Dg_yf4shPhF4rcUCGqnFFzIDSU9Rv2NNMK5DPO4512uTxAQUMHpi5PGTki-zykqTB10Ju1L4jRhmJwJDtGcfdHPlEKKUrFPfYl3RPZLOfdyAqSJ8Gi0R3ymDffmXHz08AJUAY_Kapk8laggIYcvFJhYGJBWZpcy7NWMiOIjEI3bogki4o7z0-Z1xMZdZ9rqypQ1MB44F8VZS2KkPfEmhSog")
+	query.Add("jwt", createUnsignedTestToken(t, createJohnDoeTestPayload()))
 	req.URL.RawQuery = query.Encode()
 
 	jwt.ServeHTTP(recorder, req)
@@ -1154,6 +1195,7 @@ func TestTokenFromQueryNotConfigured(t *testing.T) {
 
 func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtQueryKey = "jwt"
 	ctx := context.Background()
 	nextCalled := false
@@ -1190,6 +1232,7 @@ func TestTokenFromQueryConfiguredButNotInURL(t *testing.T) {
 
 func TestTokenFromHeaderConfigured(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtSources = []map[string]string{{"type": "header", "key": "X-JWT"}}
 	ctx := context.Background()
 	nextCalled := false
@@ -1206,7 +1249,7 @@ func TestTokenFromHeaderConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header["X-JWT"] = []string{"eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.TnHVsM5_N0SKi_HCwlz3ys1cDktu10g_sKkjqzVe5k09z-bmByflWPFWjAbwgRCKAc77kF8BjDNv0gisAPurBxgxNGxioDFehhcb0IS0YeCAWpzRfBMT6gQZ1gZeNM2Dg_yf4shPhF4rcUCGqnFFzIDSU9Rv2NNMK5DPO4512uTxAQUMHpi5PGTki-zykqTB10Ju1L4jRhmJwJDtGcfdHPlEKKUrFPfYl3RPZLOfdyAqSJ8Gi0R3ymDffmXHz08AJUAY_Kapk8laggIYcvFJhYGJBWZpcy7NWMiOIjEI3bogki4o7z0-Z1xMZdZ9rqypQ1MB44F8VZS2KkPfEmhSog"}
+	req.Header["X-JWT"] = []string{createUnsignedTestToken(t, createJohnDoeTestPayload())}
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1217,6 +1260,7 @@ func TestTokenFromHeaderConfigured(t *testing.T) {
 
 func TestTokenSourceOrder(t *testing.T) {
 	cfg := *CreateConfig()
+	cfg.ExpectedAudiences = []string{testAudience}
 	cfg.JwtSources = []map[string]string{{"type": "header", "key": "X-JWT"}, {"type": "cookie", "key": "jwt"}}
 	ctx := context.Background()
 	nextCalled := false
@@ -1233,7 +1277,7 @@ func TestTokenSourceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.AddCookie(&http.Cookie{Name: "jwt", Value: "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.TnHVsM5_N0SKi_HCwlz3ys1cDktu10g_sKkjqzVe5k09z-bmByflWPFWjAbwgRCKAc77kF8BjDNv0gisAPurBxgxNGxioDFehhcb0IS0YeCAWpzRfBMT6gQZ1gZeNM2Dg_yf4shPhF4rcUCGqnFFzIDSU9Rv2NNMK5DPO4512uTxAQUMHpi5PGTki-zykqTB10Ju1L4jRhmJwJDtGcfdHPlEKKUrFPfYl3RPZLOfdyAqSJ8Gi0R3ymDffmXHz08AJUAY_Kapk8laggIYcvFJhYGJBWZpcy7NWMiOIjEI3bogki4o7z0-Z1xMZdZ9rqypQ1MB44F8VZS2KkPfEmhSog"})
+	req.AddCookie(&http.Cookie{Name: "jwt", Value: createUnsignedTestToken(t, createJohnDoeTestPayload())})
 
 	jwt.ServeHTTP(recorder, req)
 
@@ -1274,7 +1318,8 @@ func TestJwksHeaders(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Config{
-				JwksHeaders: tt.jwksHeaders,
+				JwksHeaders:       tt.jwksHeaders,
+				ExpectedAudiences: []string{testAudience},
 			}
 			ctx := context.Background()
 
@@ -1312,8 +1357,9 @@ func mustParseUrl(urlStr string) *url.URL {
 // value, leaving exactly one value and no trace of the forged one.
 func TestServeHTTPStripsForgedHeaderWithValidToken(t *testing.T) {
 	cfg := Config{
-		JwtHeaders: map[string]string{"Name": "name"},
-		Keys:       []string{"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzyis1ZjfNB0bBgKFMSv\nvkTtwlvBsaJq7S5wA+kzeVOVpVWwkWdVha4s38XM/pa/yr47av7+z3VTmvDRyAHc\naT92whREFpLv9cj5lTeJSibyr/Mrm/YtjCZVWgaOYIhwrXwKLqPr/11inWsAkfIy\ntvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr4B8nW3HCN47XUu0t8Y0\ne+lf4s4OxQawWD79J9/5d3Ry0vbV3Am1FtGJiJvOwRsIfVChDpYStTcHTCMqtvWb\nV6L11BWkpzGXSW4Hv43qa+GSYOD2QU68Mb59oSk2OB+BtOLpJofmbGEGgvmwyCI9\nMwIDAQAB\n-----END PUBLIC KEY-----"},
+		JwtHeaders:        map[string]string{"Name": "name"},
+		Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -1330,7 +1376,7 @@ func TestServeHTTPStripsForgedHeaderWithValidToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header["Authorization"] = []string{"Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWUsImlhdCI6MTUxNjIzOTAyMn0.JlX3gXGyClTBFciHhknWrjo7SKqyJ5iBO0n-3S2_I7cIgfaZAeRDJ3SQEbaPxVC7X8aqGCOM-pQOjZPKUJN8DMFrlHTOdqMs0TwQ2PRBmVAxXTSOZOoEhD4ZNCHohYoyfoDhJDP4Qye_FCqu6POJzg0Jcun4d3KW04QTiGxv2PkYqmB7nHxYuJdnqE3704hIS56pc_8q6AW0WIT0W-nIvwzaSbtBU9RgaC7ZpBD2LiNE265UBIFraMDF8IAFw9itZSUCTKg1Q-q27NwwBZNGYStMdIBDor2Bsq5ge51EkWajzZ7ALisVp-bskzUsqUf77ejqX_CBAqkNdH1Zebn93A"}
+	req.Header["Authorization"] = []string{"Bearer " + createTestToken(t, map[string]interface{}{"alg": "RS512", "typ": "JWT"}, createJohnDoeTestPayload(), testPrivateKey)}
 	req.Header["Name"] = []string{"Forged Attacker"}
 
 	jwt.ServeHTTP(recorder, req)
@@ -1351,8 +1397,9 @@ func TestServeHTTPStripsForgedHeaderWithValidToken(t *testing.T) {
 // stripped, not passed through to the backend.
 func TestServeHTTPStripsForgedHeaderWithoutToken(t *testing.T) {
 	cfg := Config{
-		Required:   false,
-		JwtHeaders: map[string]string{"Name": "name"},
+		Required:          false,
+		JwtHeaders:        map[string]string{"Name": "name"},
+		ExpectedAudiences: []string{testAudience},
 	}
 	ctx := context.Background()
 	nextCalled := false
@@ -1405,5 +1452,310 @@ func TestAudienceContains(t *testing.T) {
 				t.Fatalf("audienceContains(%v, %q) = %v, want %v", c.aud, c.expected, got, c.want)
 			}
 		})
+	}
+}
+
+// TestServeHTTPExpectedAudiencesSigned runs signed tokens through ServeHTTP with Keys set, as in production, so the aud claim is decoded with UseNumber and a number arrives as json.Number. A valid token passes with each form in which Traefik hands the audiences to the plugin: a YAML list, a comma-separated string, which Traefik's mapstructure.StringToSliceHookFunc(",") splits without trimming, and a single value next to a list. The other cases show the order of the checks, which is the signature, the issuer, the audience and then the exp claim, and that only string values of the aud claim count.
+func TestServeHTTPExpectedAudiencesSigned(t *testing.T) {
+	const issuer = "https://auth.example.test/application/o/neurapolis-app/"
+	otherPrivateKey := generateTestPrivateKey()
+	validExp := time.Now().Add(5 * time.Minute).Unix()
+	expiredExp := time.Now().Add(-5 * time.Minute).Unix()
+
+	cases := []struct {
+		name              string
+		expectedAudiences []string
+		signingKey        *rsa.PrivateKey
+		iss               string
+		aud               interface{}
+		exp               int64
+		wantErrorType     string
+	}{
+		{"YAML list passes an array aud", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, []interface{}{"other", "neuraplex"}, validExp, ""},
+		{"comma-separated string with spaces passes", strings.Split("neurapolis-app, neuraplex", ","), testPrivateKey, issuer, "neuraplex", validExp, ""},
+		{"first audience of the list passes", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "neurapolis-app", validExp, ""},
+		{"other signing key rejected before the issuer and the audience", []string{"neurapolis-app", "neuraplex"}, otherPrivateKey, "https://other.example.test/", "librechat", validExp, ErrorTypeUnauthenticatedJwtSignatureInvalid},
+		{"other issuer rejected before the audience", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, "https://auth.example.test/application/o/neuraplex/", "librechat", validExp, ErrorTypeUnauthenticatedJwtIssuerInvalid},
+		{"other audience rejected", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "librechat", validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"expired token with another audience rejected for the audience before the exp claim", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "librechat", expiredExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"expired token with an audience of the list rejected as expired", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, "neuraplex", expiredExp, ErrorTypeUnauthenticatedJwtExpired},
+		{"missing audience rejected", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, nil, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"numeric aud never matches its formatted form", []string{"42"}, testPrivateKey, issuer, 42, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"numeric aud entry never matches its formatted form", []string{"42"}, testPrivateKey, issuer, []interface{}{42}, validExp, ErrorTypeUnauthenticatedJwtAudienceInvalid},
+		{"string aud entry next to a numeric entry passes", []string{"neurapolis-app", "neuraplex"}, testPrivateKey, issuer, []interface{}{42, "neuraplex"}, validExp, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{
+				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+				ExpectedIssuer:    issuer,
+				ExpectedAudiences: c.expectedAudiences,
+				PayloadFields:     []string{"exp"},
+				JwtHeaders:        map[string]string{"X-Account-Id": "sub"},
+			}
+			ctx := context.Background()
+			nextCalled := false
+			next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
+
+			jwt, err := New(ctx, next, &cfg, "test-traefik-jwt-plugin")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			recorder := httptest.NewRecorder()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := map[string]interface{}{"sub": "user-1", "iss": c.iss, "exp": c.exp}
+			if c.aud != nil {
+				payload["aud"] = c.aud
+			}
+			req.Header["Authorization"] = []string{"Bearer " + createSignedTestToken(t, c.signingKey, payload)}
+
+			jwt.ServeHTTP(recorder, req)
+
+			if c.wantErrorType == "" {
+				if !nextCalled {
+					t.Fatalf("Expected next.ServeHTTP to be called, got status %d and body %s", recorder.Code, recorder.Body.String())
+				}
+				if req.Header.Get("X-Account-Id") != "user-1" {
+					t.Fatalf("Expected header X-Account-Id:user-1, got %q", req.Header.Get("X-Account-Id"))
+				}
+				return
+			}
+			if nextCalled {
+				t.Fatal("Expected next.ServeHTTP not to be called")
+			}
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("Expected status code %d, got %d", http.StatusUnauthorized, recorder.Code)
+			}
+			if !strings.Contains(recorder.Body.String(), c.wantErrorType) {
+				t.Fatalf("Expected body to contain %s, got %s", c.wantErrorType, recorder.Body.String())
+			}
+		})
+	}
+}
+
+// TestDecodedConfigurationAudienceCheck runs the audience settings, in the form in which Traefik hands them to New, through New and ServeHTTP. An invalid one gives a middleware that rejects every request instead of one that fails to load, because Traefik skips a router whose middleware fails to load, and the request then reaches the next router that matches it, which may not check a token at all.
+func TestDecodedConfigurationAudienceCheck(t *testing.T) {
+	// The table mirrors the Config values that createConfig in pkg/plugins/middlewareyaegi.go of Traefik v3.7.10 decodes with mapstructure v1.5.1-0.20231216201459-8508981c8b6c from each raw configuration.
+	cases := []struct {
+		name              string
+		expectedAudiences []string
+		wantPass          bool
+	}{
+		{`ExpectedAudiences: "" or []`, []string{}, false},
+		{`ExpectedAudiences: null, omitted or misspelled`, nil, false},
+		{`ExpectedAudiences: "neurapolis-app,"`, []string{"neurapolis-app", ""}, false},
+		{`ExpectedAudiences: " "`, []string{" "}, false},
+		{`ExpectedAudiences: " neurapolis-app "`, []string{" neurapolis-app "}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			config := &Config{
+				Keys:              []string{createTestPublicKeyPem(t, &testPrivateKey.PublicKey)},
+				ExpectedAudiences: c.expectedAudiences,
+			}
+			token := createSignedTestToken(t, testPrivateKey, map[string]interface{}{"sub": "user-1", "aud": "neurapolis-app"})
+			if !c.wantPass {
+				assertNewRejectsEveryRequest(t, config, token)
+				return
+			}
+
+			handler, err := New(context.Background(), http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {}), config, "test-traefik-jwt-plugin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status := serveTestRequest(t, handler, token); status != http.StatusOK {
+				t.Fatalf("Expected the token to pass, got status %d", status)
+			}
+		})
+	}
+}
+
+// TestNewLogsInvalidConfigurationOnce checks that New logs an invalid configuration once, naming the middleware, through the log package, which yaegi sends to the stderr that Traefik logs at the ERROR level. Requests do not log it again.
+func TestNewLogsInvalidConfigurationOnce(t *testing.T) {
+	var logOutput bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	defer log.SetOutput(previousLogOutput)
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
+
+	handler, err := New(context.Background(), next, &Config{ExpectedAudiences: []string{"neurapolis-app", ""}}, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	// Restoring the output first means that nothing writes to the buffer while it is read.
+	log.SetOutput(previousLogOutput)
+	if count := strings.Count(logOutput.String(), "Invalid configuration of middleware test-traefik-jwt-plugin"); count != 1 {
+		t.Fatalf("Expected the configuration error to be logged once, got %d times in %q", count, logOutput.String())
+	}
+	if !strings.Contains(logOutput.String(), `"level":"error"`) {
+		t.Fatalf("Expected an error level log event, got %q", logOutput.String())
+	}
+}
+
+// testAudience is the audience that the tests configure and that their tokens carry, unless a test is about the audience check itself.
+const testAudience = "test-audience"
+
+// testPrivateKey signs the tokens of the tests that need a valid signature but no key of their own.
+var testPrivateKey = generateTestPrivateKey()
+
+// generateTestPrivateKey generates an RSA key that a test signs its tokens with.
+func generateTestPrivateKey() *rsa.PrivateKey {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	return privateKey
+}
+
+// createTestPublicKeyPem encodes the public key in the PEM form that the Keys setting accepts.
+func createTestPublicKeyPem(t *testing.T, publicKey interface{}) string {
+	publicKeyDer, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicKeyDer}))
+}
+
+// createTestToken encodes the header and the payload and signs them with the key, using the algorithm that the alg header names. The tests generate their keys, so a token can carry the claims that a test needs.
+func createTestToken(t *testing.T, header, payload map[string]interface{}, key interface{}) string {
+	headerJson, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadJson, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signingInput := base64.RawURLEncoding.EncodeToString(headerJson) + "." + base64.RawURLEncoding.EncodeToString(payloadJson)
+	algorithmName := fmt.Sprint(header["alg"])
+	algorithm, ok := tokenAlgorithms[algorithmName]
+	if !ok {
+		t.Fatalf("Unknown algorithm %s", algorithmName)
+	}
+	digest := algorithm.hash.New()
+	_, _ = digest.Write([]byte(signingInput))
+	var signature []byte
+	switch algorithmName[:2] {
+	case "RS":
+		signature, err = rsa.SignPKCS1v15(rand.Reader, key.(*rsa.PrivateKey), algorithm.hash, digest.Sum(nil))
+	case "PS":
+		signature, err = rsa.SignPSS(rand.Reader, key.(*rsa.PrivateKey), algorithm.hash, digest.Sum(nil), nil)
+	case "ES":
+		ecdsaKey := key.(*ecdsa.PrivateKey)
+		r, s, signErr := ecdsa.Sign(rand.Reader, ecdsaKey, digest.Sum(nil))
+		err = signErr
+		size := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+		signature = append(r.FillBytes(make([]byte, size)), s.FillBytes(make([]byte, size))...)
+	case "HS":
+		mac := hmac.New(algorithm.hash.New, key.([]byte))
+		_, _ = mac.Write([]byte(signingInput))
+		signature = mac.Sum(nil)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+// createSignedTestToken signs the payload with the key using RS256.
+func createSignedTestToken(t *testing.T, privateKey *rsa.PrivateKey, payload map[string]interface{}) string {
+	token := createTestToken(t, map[string]interface{}{"alg": "RS256", "typ": "JWT"}, payload, privateKey)
+	return token
+}
+
+// createUnsignedTestToken builds a token whose signature no key produced.
+func createUnsignedTestToken(t *testing.T, payload map[string]interface{}) string {
+	header, err := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(body) + "." + base64.RawURLEncoding.EncodeToString([]byte("signature"))
+	return token
+}
+
+// createJohnDoeTestPayload returns the claims of the jwt.io sample token plus the test audience, because a token without a configured audience is rejected.
+func createJohnDoeTestPayload() map[string]interface{} {
+	return map[string]interface{}{"sub": "1234567890", "name": "John Doe", "admin": true, "iat": 1516239022, "aud": testAudience}
+}
+
+// serveTestRequest sends a request with the token through the middleware and returns the status of the response. It fails the test when the request does not finish within ten seconds, so that a request that waits forever for a refresh fails the test instead of hanging it.
+func serveTestRequest(t *testing.T, handler http.Handler, token string) int {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header["Authorization"] = []string{"Bearer " + token}
+	recorder := httptest.NewRecorder()
+	served := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(recorder, req)
+		close(served)
+	}()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Expected the request to finish within ten seconds")
+	}
+	return recorder.Code
+}
+
+// assertNewRejectsEveryRequest checks that New turns an invalid configuration into a middleware instead of an error, and that the middleware answers a request with the token and a request without a token with a 500 and the configuration error type. It never calls next and still strips a forged X-Account-Id header, which the JwtHeaders that this function sets would otherwise fill from the token.
+func assertNewRejectsEveryRequest(t *testing.T, config *Config, token string) {
+	t.Helper()
+	config.JwtHeaders = map[string]string{"X-Account-Id": "sub"}
+	nextCalled := false
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { nextCalled = true })
+
+	handler, err := New(context.Background(), next, config, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatalf("Expected New to return a middleware that rejects every request, got error %v", err)
+	}
+	if handler == nil {
+		t.Fatal("Expected New to return a middleware, got nil")
+	}
+
+	for _, authorization := range []string{"Bearer " + token, ""} {
+		recorder := httptest.NewRecorder()
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if authorization != "" {
+			req.Header["Authorization"] = []string{authorization}
+		}
+		req.Header["X-Account-Id"] = []string{"forged"}
+
+		handler.ServeHTTP(recorder, req)
+
+		if nextCalled {
+			t.Fatal("Expected next.ServeHTTP not to be called")
+		}
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("Expected status code %d, got %d with body %s", http.StatusInternalServerError, recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), ErrorTypeUnauthenticatedConfigurationInvalid) {
+			t.Fatalf("Expected body to contain %s, got %s", ErrorTypeUnauthenticatedConfigurationInvalid, recorder.Body.String())
+		}
+		if values := req.Header["X-Account-Id"]; len(values) != 0 {
+			t.Fatalf("Expected the forged X-Account-Id header to be stripped, got %q", values)
+		}
 	}
 }

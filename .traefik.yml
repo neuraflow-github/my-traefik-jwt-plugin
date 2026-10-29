@@ -14,6 +14,8 @@ testData:
   PayloadFields:
     - exp
   Required: true
+  ExpectedAudiences:
+    - example-audience
   Keys:
     - |
       -----BEGIN PUBLIC KEY-----
