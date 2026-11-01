@@ -62,8 +62,18 @@ func (e *ErrorResponse) Error() string {
 	return e.Type
 }
 
-// map of cancel  functions for background refresh. whe a new configuration is loaded, the old background refresh with the same name is cancelled
-var backgroundRefreshCancel map[string]context.CancelFunc = make(map[string]context.CancelFunc)
+// keyStores holds the keyStore of every middleware by its name. Traefik calls New once for every router that uses a middleware, so these instances share one keyStore and one background refresh.
+var (
+	keyStores     = map[string]*keyStore{}
+	keyStoresLock sync.Mutex
+)
+
+const (
+	// keysFetchTimeout bounds every request to a JWK endpoint, so that an endpoint that accepts the connection but never answers cannot hold a fetch forever.
+	keysFetchTimeout = 5 * time.Second
+	// failedFetchRetryInterval is the least time from the start of one key fetch to a retry that a request starts after a failed fetch.
+	failedFetchRetryInterval = 10 * time.Second
+)
 
 // Config the plugin configuration.
 type Config struct {
@@ -99,7 +109,6 @@ func CreateConfig() *Config {
 
 // JwtPlugin contains the runtime config
 type JwtPlugin struct {
-	httpClient         *http.Client
 	next               http.Handler
 	opaUrl             string
 	opaAllowField      string
@@ -107,24 +116,39 @@ type JwtPlugin struct {
 	opaDebugMode       bool
 	payloadFields      []string
 	required           bool
-	jwkEndpoints       []*url.URL
-	keys               map[string]interface{}
+	keyStore           *keyStore
+	forceRefresh       bool
 	alg                string
 	expectedIssuer     string
 	expectedAudiences  []string
 	opaHeaders         map[string]string
 	jwtHeaders         map[string]string
-	jwksHeaders        map[string]string
 	opaResponseHeaders map[string]string
 	opaHttpStatusField string
 	jwtSources         []map[string]string
 
 	name               string
-	keysLock           sync.RWMutex
-	forceRefreshCmd    chan chan<- struct{}
-	cancelCtx          context.Context
-	lastFetchFailed    bool
 	configurationError error
+}
+
+// keyStore holds the keys of one middleware configuration: the static keys of its Keys entries and the keys that each of its JWK endpoints returned in its last successful fetch.
+type keyStore struct {
+	fingerprint     string
+	staticKeys      map[string]interface{}
+	jwkEndpoints    []*url.URL
+	jwksHeaders     map[string]string
+	httpClient      *http.Client
+	forceRefreshCmd chan chan<- struct{}
+	cancelCtx       context.Context
+	cancel          context.CancelFunc
+
+	fetchLock          sync.Mutex
+	keysLock           sync.RWMutex
+	endpointKeys       []map[string]interface{}
+	keys               map[string]interface{}
+	lastFetchFailed    bool
+	fetchInFlight      bool
+	lastFetchStartedAt time.Time
 }
 
 // LogEvent contains a single log entry
@@ -218,7 +242,6 @@ type Response struct {
 func New(ctx context.Context, next http.Handler, config *Config, pluginName string) (http.Handler, error) {
 	expectedAudiences, err := normalizeExpectedAudiences(config.ExpectedAudiences, pluginName)
 	jwtPlugin := &JwtPlugin{
-		httpClient:         &http.Client{},
 		next:               next,
 		opaUrl:             config.OpaUrl,
 		opaAllowField:      config.OpaAllowField,
@@ -226,13 +249,12 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		opaDebugMode:       config.OpaDebugMode,
 		payloadFields:      config.PayloadFields,
 		required:           config.Required,
+		forceRefresh:       config.ForceRefreshKeys,
 		alg:                config.Alg,
 		expectedIssuer:     config.ExpectedIssuer,
 		expectedAudiences:  expectedAudiences,
-		keys:               make(map[string]interface{}),
 		opaHeaders:         config.OpaHeaders,
 		jwtHeaders:         config.JwtHeaders,
-		jwksHeaders:        config.JwksHeaders,
 		opaResponseHeaders: config.OpaResponseHeaders,
 		opaHttpStatusField: config.OpaHttpStatusField,
 		jwtSources:         config.JwtSources,
@@ -252,25 +274,50 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 			jwtPlugin.jwtSources = append(jwtPlugin.jwtSources, map[string]string{"type": "query", "key": config.JwtQueryKey})
 		}
 	}
-	if len(config.Keys) > 0 {
-		if err := jwtPlugin.ParseKeys(config.Keys); err != nil {
-			return nil, err
-		}
-		if len(jwtPlugin.jwkEndpoints) > 0 {
-			if config.ForceRefreshKeys {
-				jwtPlugin.forceRefreshCmd = make(chan chan<- struct{})
-			}
-			if backgroundRefreshCancel[pluginName] != nil {
-				logInfo(fmt.Sprintf("Cancel BackgroundRefresh %s", pluginName)).print()
-				backgroundRefreshCancel[pluginName]()
-			}
-			cancel, cancelFunc := context.WithCancel(ctx)
-			backgroundRefreshCancel[pluginName] = cancelFunc
-			jwtPlugin.cancelCtx = cancel
-			go jwtPlugin.BackgroundRefresh()
-		}
+	if len(config.Keys) == 0 {
+		jwtPlugin.rejectEveryRequest(fmt.Errorf("Invalid configuration of middleware %s, because Keys is empty, but must name at least one PEM certificate, PEM public key or JWK URL", pluginName))
+		return jwtPlugin, nil
 	}
+	store, err := getKeyStore(ctx, config.Keys, config.JwksHeaders, pluginName)
+	if err != nil {
+		jwtPlugin.rejectEveryRequest(fmt.Errorf("Invalid configuration of middleware %s, because a Keys entry cannot be used (%v), but must be a PEM certificate, a PEM public key or a JWK URL", pluginName, err))
+		return jwtPlugin, nil
+	}
+	jwtPlugin.keyStore = store
 	return jwtPlugin, nil
+}
+
+// getKeyStore returns the keyStore of the middleware, which its instances for the different routers share. It creates a new one when the middleware has none yet, when its Keys or JwksHeaders changed, or when the context of the New call that created the current one is done, which Traefik v3.7.10 does on every configuration reload. Creating a new one stops the background refresh of the one it replaces.
+func getKeyStore(ctx context.Context, keys []string, jwksHeaders map[string]string, pluginName string) (*keyStore, error) {
+	fingerprint := fmt.Sprintf("%q %q", keys, jwksHeaders)
+	keyStoresLock.Lock()
+	defer keyStoresLock.Unlock()
+	current := keyStores[pluginName]
+	if current != nil && current.fingerprint == fingerprint && current.cancelCtx.Err() == nil {
+		return current, nil
+	}
+	store := &keyStore{
+		fingerprint:     fingerprint,
+		staticKeys:      make(map[string]interface{}),
+		jwksHeaders:     jwksHeaders,
+		httpClient:      &http.Client{Timeout: keysFetchTimeout},
+		forceRefreshCmd: make(chan chan<- struct{}),
+	}
+	if err := store.parseKeys(keys); err != nil {
+		return nil, err
+	}
+	store.endpointKeys = make([]map[string]interface{}, len(store.jwkEndpoints))
+	store.keys = store.staticKeys
+	if current != nil {
+		logInfo(fmt.Sprintf("Cancel BackgroundRefresh %s", pluginName)).print()
+		current.cancel()
+	}
+	store.cancelCtx, store.cancel = context.WithCancel(ctx)
+	keyStores[pluginName] = store
+	if len(store.jwkEndpoints) > 0 {
+		go store.refreshInBackground(pluginName)
+	}
+	return store, nil
 }
 
 // rejectEveryRequest makes the plugin answer every request with a 500 and logs the configuration error once. New uses it instead of returning the error, because Traefik skips a router whose middleware fails to load, and the request then reaches the next router that matches it, which may not check a token at all.
@@ -279,37 +326,68 @@ func (jwtPlugin *JwtPlugin) rejectEveryRequest(configurationError error) {
 	logError(fmt.Sprintf("%s, so the middleware rejects every request", configurationError.Error())).printToErrorLog()
 }
 
-func (jwtPlugin *JwtPlugin) BackgroundRefresh() {
-	jwtPlugin.FetchKeys()
+func (store *keyStore) refreshInBackground(pluginName string) {
+	store.fetchKeys()
 	for {
 		select {
-		case keysFetchedChan := <-jwtPlugin.forceRefreshCmd:
-			jwtPlugin.FetchKeys()
+		case keysFetchedChan := <-store.forceRefreshCmd:
+			store.fetchKeys()
 			keysFetchedChan <- struct{}{}
-		case <-jwtPlugin.cancelCtx.Done():
-			logInfo(fmt.Sprintf("Quit BackgroundRefresh for %s", jwtPlugin.name)).print()
+		case <-store.cancelCtx.Done():
+			logInfo(fmt.Sprintf("Quit BackgroundRefresh for %s", pluginName)).print()
 			return
 		case <-time.After(15 * time.Minute):
-			jwtPlugin.FetchKeys()
+			store.fetchKeys()
 		}
 	}
 }
 
 func (jwtPlugin *JwtPlugin) forceRefreshKeys() (refreshed bool) {
-	if jwtPlugin.forceRefreshCmd == nil || len(jwtPlugin.jwkEndpoints) == 0 {
+	if !jwtPlugin.forceRefresh || len(jwtPlugin.keyStore.jwkEndpoints) == 0 {
 		return
 	}
-	refreshedCh := make(chan struct{})
-	jwtPlugin.forceRefreshCmd <- refreshedCh
-	<-refreshedCh
+	jwtPlugin.keyStore.forceRefresh()
 	refreshed = true
 	return
 }
 
-func (jwtPlugin *JwtPlugin) ParseKeys(certificates []string) error {
-	jwtPlugin.keysLock.Lock()
-	defer jwtPlugin.keysLock.Unlock()
+// forceRefresh fetches the keys and waits for them, but never longer than keysFetchTimeout, so that an endpoint that does not answer cannot hold the request. The background refresh fetches them, so that the fetch follows its first one, unless it has stopped because the keyStore was replaced, and then a new goroutine fetches them.
+func (store *keyStore) forceRefresh() {
+	timeout := time.After(keysFetchTimeout)
+	refreshedCh := make(chan struct{}, 1)
+	select {
+	case store.forceRefreshCmd <- refreshedCh:
+	case <-store.cancelCtx.Done():
+		go func() {
+			store.fetchKeys()
+			refreshedCh <- struct{}{}
+		}()
+	case <-timeout:
+		return
+	}
+	select {
+	case <-refreshedCh:
+	case <-timeout:
+	}
+}
 
+// retryFailedFetch starts a fetch in the background after a failed fetch and returns without waiting for it. It starts none while a fetch runs or within failedFetchRetryInterval of the start of the last one, and marks the start under the lock, so that concurrent requests start at most one fetch.
+func (store *keyStore) retryFailedFetch() {
+	store.keysLock.Lock()
+	shouldRetry := store.lastFetchFailed && !store.fetchInFlight && time.Since(store.lastFetchStartedAt) >= failedFetchRetryInterval
+	if shouldRetry {
+		store.fetchInFlight = true
+		store.lastFetchStartedAt = time.Now()
+	}
+	store.keysLock.Unlock()
+	if !shouldRetry {
+		return
+	}
+	logInfo("VerifyToken - Last key fetch failed, retrying in the background").print()
+	go store.fetchKeys()
+}
+
+func (store *keyStore) parseKeys(certificates []string) error {
 	for _, certificate := range certificates {
 		if block, rest := pem.Decode([]byte(certificate)); block != nil {
 			if len(rest) > 0 {
@@ -320,18 +398,18 @@ func (jwtPlugin *JwtPlugin) ParseKeys(certificates []string) error {
 				if err != nil {
 					return fmt.Errorf("failed to parse a PEM certificate: %v", err)
 				}
-				jwtPlugin.keys[base64.RawURLEncoding.EncodeToString(cert.SubjectKeyId)] = cert.PublicKey
+				store.staticKeys[base64.RawURLEncoding.EncodeToString(cert.SubjectKeyId)] = cert.PublicKey
 			} else if block.Type == "PUBLIC KEY" || block.Type == "RSA PUBLIC KEY" {
 				key, err := x509.ParsePKIXPublicKey(block.Bytes)
 				if err != nil {
 					return fmt.Errorf("failed to parse a PEM public key: %v", err)
 				}
-				jwtPlugin.keys[strconv.Itoa(len(jwtPlugin.keys))] = key
+				store.staticKeys[strconv.Itoa(len(store.staticKeys))] = key
 			} else {
 				return fmt.Errorf("failed to extract a Key from the PEM certificate")
 			}
 		} else if u, err := url.ParseRequestURI(certificate); err == nil {
-			jwtPlugin.jwkEndpoints = append(jwtPlugin.jwkEndpoints, u)
+			store.jwkEndpoints = append(store.jwkEndpoints, u)
 		} else {
 			return fmt.Errorf("Invalid configuration, expecting a certificate, public key or JWK URL")
 		}
@@ -339,40 +417,55 @@ func (jwtPlugin *JwtPlugin) ParseKeys(certificates []string) error {
 	return nil
 }
 
-func (jwtPlugin *JwtPlugin) FetchKeys() {
-	logInfo(fmt.Sprintf("FetchKeys - #%d jwkEndpoints to fetch", len(jwtPlugin.jwkEndpoints))).
+// fetchKeys fetches the keys of every JWK endpoint. The keys of an endpoint whose fetch succeeds replace the ones it returned before, so a key that the endpoint no longer returns is no longer trusted. An endpoint whose fetch fails keeps the keys of its last successful fetch.
+func (store *keyStore) fetchKeys() {
+	// Fetches run one at a time, so that an older fetch never replaces the keys of a newer one.
+	store.fetchLock.Lock()
+	defer store.fetchLock.Unlock()
+	logInfo(fmt.Sprintf("FetchKeys - #%d jwkEndpoints to fetch", len(store.jwkEndpoints))).
 		print()
-	fetchedKeys := map[string]interface{}{}
-	jwtPlugin.lastFetchFailed = false
-	for _, u := range jwtPlugin.jwkEndpoints {
+	store.keysLock.Lock()
+	store.fetchInFlight = true
+	store.lastFetchStartedAt = time.Now()
+	store.keysLock.Unlock()
+	fetchedEndpointKeys := make([]map[string]interface{}, len(store.jwkEndpoints))
+	fetchFailed := false
+	for index, u := range store.jwkEndpoints {
 		req, err := http.NewRequest("GET", u.String(), nil)
 		if err != nil {
 			logWarn("FetchKeys - Failed to create request").withUrl(u.String()).print()
-			jwtPlugin.lastFetchFailed = true
+			fetchFailed = true
 			continue
 		}
-		for headerKey, headerValue := range jwtPlugin.jwksHeaders {
+		for headerKey, headerValue := range store.jwksHeaders {
 			req.Header.Add(headerKey, headerValue)
 		}
-		response, err := jwtPlugin.httpClient.Do(req)
+		response, err := store.httpClient.Do(req)
 		if err != nil {
 			logWarn("FetchKeys - Failed to fetch keys").withUrl(u.String()).print()
-			jwtPlugin.lastFetchFailed = true
+			fetchFailed = true
 			continue
 		}
 		body, err := io.ReadAll(response.Body)
 		if err != nil {
 			logWarn("FetchKeys - Failed to read keys").withUrl(u.String()).print()
-			jwtPlugin.lastFetchFailed = true
+			fetchFailed = true
+			continue
+		}
+		// An error answer must not count as an endpoint that returns no keys, because that would remove all of its keys.
+		if response.StatusCode != http.StatusOK {
+			logWarn(fmt.Sprintf("FetchKeys - Failed to fetch keys, status %d", response.StatusCode)).withUrl(u.String()).print()
+			fetchFailed = true
 			continue
 		}
 		var jwksKeys Keys
 		err = json.Unmarshal(body, &jwksKeys)
 		if err != nil {
 			logWarn("FetchKeys - Failed to unmarshal keys").withUrl(u.String()).print()
-			jwtPlugin.lastFetchFailed = true
+			fetchFailed = true
 			continue
 		}
+		fetchedKeys := map[string]interface{}{}
 		for _, key := range jwksKeys.Keys {
 			switch key.Kty {
 			case "RSA":
@@ -454,14 +547,28 @@ func (jwtPlugin *JwtPlugin) FetchKeys() {
 				}
 			}
 		}
+		fetchedEndpointKeys[index] = fetchedKeys
 	}
 
-	jwtPlugin.keysLock.Lock()
-	defer jwtPlugin.keysLock.Unlock()
+	store.keysLock.Lock()
+	defer store.keysLock.Unlock()
 
-	for k, v := range fetchedKeys {
-		jwtPlugin.keys[k] = v
+	// Readers keep using the map that getKeysSync returned to them after the lock is released, so the keys go into a new map instead of being written into the one they may be reading.
+	keys := make(map[string]interface{}, len(store.staticKeys))
+	for k, v := range store.staticKeys {
+		keys[k] = v
 	}
+	for index, fetchedKeys := range fetchedEndpointKeys {
+		if fetchedKeys != nil {
+			store.endpointKeys[index] = fetchedKeys
+		}
+		for k, v := range store.endpointKeys[index] {
+			keys[k] = v
+		}
+	}
+	store.keys = keys
+	store.lastFetchFailed = fetchFailed
+	store.fetchInFlight = false
 }
 
 func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Request) {
@@ -573,16 +680,13 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 	sub := ""
 	if jwtToken != nil {
 		sub = fmt.Sprint(jwtToken.Payload["sub"])
-		// only verify jwt tokens if keys are configured
-		if len(jwtPlugin.getKeysSync()) > 0 || len(jwtPlugin.jwkEndpoints) > 0 {
-			if err = jwtPlugin.VerifyToken(jwtToken); err != nil {
-				logError(fmt.Sprintf("Token is invalid - err: %s", err.Error())).
-					withSub(sub).
-					withUrl(request.URL.String()).
-					withNetwork(jwtPlugin.remoteAddr(request)).
-					print()
-				return 0, err
-			}
+		if err = jwtPlugin.VerifyToken(jwtToken); err != nil {
+			logError(fmt.Sprintf("Token is invalid - err: %s", err.Error())).
+				withSub(sub).
+				withUrl(request.URL.String()).
+				withNetwork(jwtPlugin.remoteAddr(request)).
+				print()
+			return 0, err
 		}
 		// A valid signature only proves the token was minted by the trusted authority, not that it was minted for this gateway. When several providers share one signing key, the issuer and audience claims are the only thing that distinguishes their tokens, so they are checked by value here. Without this a token issued for another provider is signature-valid and would be accepted.
 		if jwtPlugin.expectedIssuer != "" {
@@ -802,16 +906,16 @@ func (jwtPlugin *JwtPlugin) remoteAddr(req *http.Request) Network {
 	}
 }
 
-func (jwtPlugin *JwtPlugin) getKeysSync() map[string]interface{} {
-	jwtPlugin.keysLock.RLock()
-	defer jwtPlugin.keysLock.RUnlock()
-	return jwtPlugin.keys
+// getKeysSync returns the current keys. fetchKeys replaces the map instead of writing into it, so the returned map is safe to read after the lock is released, but must not be written to.
+func (store *keyStore) getKeysSync() map[string]interface{} {
+	store.keysLock.RLock()
+	defer store.keysLock.RUnlock()
+	return store.keys
 }
 
 func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
-	if jwtPlugin.lastFetchFailed && len(jwtPlugin.jwkEndpoints) > 0 {
-		logInfo("VerifyToken - Last key fetch failed, retrying").print()
-		jwtPlugin.FetchKeys()
+	if len(jwtPlugin.keyStore.jwkEndpoints) > 0 {
+		jwtPlugin.keyStore.retryFailedFetch()
 	}
 	for _, h := range jwtToken.Header.Crit {
 		if _, ok := supportedHeaderNames[h]; !ok {
@@ -826,9 +930,9 @@ func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
 	if jwtPlugin.alg != "" && jwtToken.Header.Alg != jwtPlugin.alg {
 		return newErrorResponse(ErrorTypeUnauthenticatedJwtAlgorithmInvalid, nil)
 	}
-	key, ok := jwtPlugin.getKeysSync()[jwtToken.Header.Kid]
+	key, ok := jwtPlugin.keyStore.getKeysSync()[jwtToken.Header.Kid]
 	if !ok && jwtPlugin.forceRefreshKeys() {
-		key, ok = jwtPlugin.getKeysSync()[jwtToken.Header.Kid]
+		key, ok = jwtPlugin.keyStore.getKeysSync()[jwtToken.Header.Kid]
 	}
 	if ok {
 		err := a.verify(key, a.hash, jwtToken.Plaintext, jwtToken.Signature)
@@ -837,7 +941,7 @@ func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
 		}
 		return nil
 	} else {
-		for _, key := range jwtPlugin.getKeysSync() {
+		for _, key := range jwtPlugin.keyStore.getKeysSync() {
 			err := a.verify(key, a.hash, jwtToken.Plaintext, jwtToken.Signature)
 			if err == nil {
 				return nil
