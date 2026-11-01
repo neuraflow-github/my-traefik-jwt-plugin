@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"mime"
 	"mime/multipart"
@@ -29,17 +30,18 @@ import (
 
 // Error type constants
 const (
-	ErrorTypeUnauthenticatedJwtMissing          = "UNAUTHENTICATED_JWT_MISSING"
-	ErrorTypeUnauthenticatedJwtFormatInvalid    = "UNAUTHENTICATED_JWT_FORMAT_INVALID"
-	ErrorTypeUnauthenticatedJwtExpired          = "UNAUTHENTICATED_JWT_EXPIRED"
-	ErrorTypeUnauthenticatedJwtNotYetValid      = "UNAUTHENTICATED_JWT_NOT_YET_VALID"
-	ErrorTypeUnauthenticatedJwtSignatureInvalid = "UNAUTHENTICATED_JWT_SIGNATURE_INVALID"
-	ErrorTypeUnauthenticatedJwtFieldMissing     = "UNAUTHENTICATED_JWT_FIELD_MISSING"
-	ErrorTypeUnauthenticatedJwtAlgorithmInvalid = "UNAUTHENTICATED_JWT_ALGORITHM_INVALID"
-	ErrorTypeUnauthenticatedJwtIssuerInvalid    = "UNAUTHENTICATED_JWT_ISSUER_INVALID"
-	ErrorTypeUnauthenticatedJwtAudienceInvalid  = "UNAUTHENTICATED_JWT_AUDIENCE_INVALID"
-	ErrorTypeUnauthenticatedOpaResponseInvalid  = "UNAUTHENTICATED_OPA_RESPONSE_INVALID"
-	ErrorTypeUnauthenticatedOpaForbidden        = "UNAUTHENTICATED_OPA_FORBIDDEN"
+	ErrorTypeUnauthenticatedJwtMissing           = "UNAUTHENTICATED_JWT_MISSING"
+	ErrorTypeUnauthenticatedJwtFormatInvalid     = "UNAUTHENTICATED_JWT_FORMAT_INVALID"
+	ErrorTypeUnauthenticatedJwtExpired           = "UNAUTHENTICATED_JWT_EXPIRED"
+	ErrorTypeUnauthenticatedJwtNotYetValid       = "UNAUTHENTICATED_JWT_NOT_YET_VALID"
+	ErrorTypeUnauthenticatedJwtSignatureInvalid  = "UNAUTHENTICATED_JWT_SIGNATURE_INVALID"
+	ErrorTypeUnauthenticatedJwtFieldMissing      = "UNAUTHENTICATED_JWT_FIELD_MISSING"
+	ErrorTypeUnauthenticatedJwtAlgorithmInvalid  = "UNAUTHENTICATED_JWT_ALGORITHM_INVALID"
+	ErrorTypeUnauthenticatedJwtIssuerInvalid     = "UNAUTHENTICATED_JWT_ISSUER_INVALID"
+	ErrorTypeUnauthenticatedJwtAudienceInvalid   = "UNAUTHENTICATED_JWT_AUDIENCE_INVALID"
+	ErrorTypeUnauthenticatedConfigurationInvalid = "UNAUTHENTICATED_CONFIGURATION_INVALID"
+	ErrorTypeUnauthenticatedOpaResponseInvalid   = "UNAUTHENTICATED_OPA_RESPONSE_INVALID"
+	ErrorTypeUnauthenticatedOpaForbidden         = "UNAUTHENTICATED_OPA_FORBIDDEN"
 )
 
 // ErrorResponse represents a structured API error
@@ -75,7 +77,7 @@ type Config struct {
 	ForceRefreshKeys   bool
 	Alg                string
 	ExpectedIssuer     string
-	ExpectedAudience   string
+	ExpectedAudiences  []string
 	OpaHeaders         map[string]string
 	JwtHeaders         map[string]string
 	JwksHeaders        map[string]string
@@ -109,7 +111,7 @@ type JwtPlugin struct {
 	keys               map[string]interface{}
 	alg                string
 	expectedIssuer     string
-	expectedAudience   string
+	expectedAudiences  []string
 	opaHeaders         map[string]string
 	jwtHeaders         map[string]string
 	jwksHeaders        map[string]string
@@ -117,11 +119,12 @@ type JwtPlugin struct {
 	opaHttpStatusField string
 	jwtSources         []map[string]string
 
-	name            string
-	keysLock        sync.RWMutex
-	forceRefreshCmd chan chan<- struct{}
-	cancelCtx       context.Context
-	lastFetchFailed bool
+	name               string
+	keysLock           sync.RWMutex
+	forceRefreshCmd    chan chan<- struct{}
+	cancelCtx          context.Context
+	lastFetchFailed    bool
+	configurationError error
 }
 
 // LogEvent contains a single log entry
@@ -213,6 +216,7 @@ type Response struct {
 
 // New creates a new plugin
 func New(ctx context.Context, next http.Handler, config *Config, pluginName string) (http.Handler, error) {
+	expectedAudiences, err := normalizeExpectedAudiences(config.ExpectedAudiences, pluginName)
 	jwtPlugin := &JwtPlugin{
 		httpClient:         &http.Client{},
 		next:               next,
@@ -224,7 +228,7 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		required:           config.Required,
 		alg:                config.Alg,
 		expectedIssuer:     config.ExpectedIssuer,
-		expectedAudience:   config.ExpectedAudience,
+		expectedAudiences:  expectedAudiences,
 		keys:               make(map[string]interface{}),
 		opaHeaders:         config.OpaHeaders,
 		jwtHeaders:         config.JwtHeaders,
@@ -233,6 +237,10 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		opaHttpStatusField: config.OpaHttpStatusField,
 		jwtSources:         config.JwtSources,
 		name:               pluginName,
+	}
+	if err != nil {
+		jwtPlugin.rejectEveryRequest(err)
+		return jwtPlugin, nil
 	}
 	// use default order if jwtSourceOrder is set
 	if len(jwtPlugin.jwtSources) == 0 {
@@ -263,6 +271,12 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		}
 	}
 	return jwtPlugin, nil
+}
+
+// rejectEveryRequest makes the plugin answer every request with a 500 and logs the configuration error once. New uses it instead of returning the error, because Traefik skips a router whose middleware fails to load, and the request then reaches the next router that matches it, which may not check a token at all.
+func (jwtPlugin *JwtPlugin) rejectEveryRequest(configurationError error) {
+	jwtPlugin.configurationError = configurationError
+	logError(fmt.Sprintf("%s, so the middleware rejects every request", configurationError.Error())).printToErrorLog()
 }
 
 func (jwtPlugin *JwtPlugin) BackgroundRefresh() {
@@ -486,14 +500,40 @@ func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Requ
 	jwtPlugin.next.ServeHTTP(rw, request)
 }
 
-// audienceContains reports whether the aud claim carries the expected audience. The claim is a single string for one audience or an array of strings for several, so both shapes are handled.
+// normalizeExpectedAudiences trims every ExpectedAudiences entry of surrounding whitespace. Traefik decodes a comma-separated string into the list without trimming, so "a, b" arrives as "a" and " b". An audience is mandatory, so an omitted, null or empty list is a configuration error, and so is an entry that is blank after trimming, a mistake such as the trailing comma in "a,". This also catches a misspelled setting, because Traefik ignores unknown keys. Traefik decodes both "" and [] into an empty list.
+func normalizeExpectedAudiences(expectedAudiences []string, pluginName string) ([]string, error) {
+	if len(expectedAudiences) == 0 {
+		return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudiences names no audience, but must name at least one", pluginName)
+	}
+	normalized := make([]string, 0, len(expectedAudiences))
+	for index, audience := range expectedAudiences {
+		trimmed := strings.TrimSpace(audience)
+		if trimmed == "" {
+			return nil, fmt.Errorf("Invalid configuration of middleware %s, because ExpectedAudiences entry %d (%q) is blank after trimming whitespace, but must name an audience", pluginName, index, audience)
+		}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized, nil
+}
+
+// audienceContainsAny reports whether the aud claim carries at least one of the expected audiences.
+func audienceContainsAny(audClaim interface{}, expectedAudiences []string) bool {
+	for _, expected := range expectedAudiences {
+		if audienceContains(audClaim, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+// audienceContains reports whether the aud claim carries the expected audience. The claim is a single string for one audience or an array of strings for several, so both shapes are handled. Only string values count, so a number, a nested array or an object never matches, not even an expected audience that looks like its formatted form.
 func audienceContains(audClaim interface{}, expected string) bool {
 	switch aud := audClaim.(type) {
 	case string:
 		return aud == expected
 	case []interface{}:
 		for _, entry := range aud {
-			if fmt.Sprint(entry) == expected {
+			if entryString, ok := entry.(string); ok && entryString == expected {
 				return true
 			}
 		}
@@ -512,6 +552,10 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 	// otherwise pass through untouched.
 	for k := range jwtPlugin.jwtHeaders {
 		request.Header.Del(k)
+	}
+
+	if jwtPlugin.configurationError != nil {
+		return http.StatusInternalServerError, newErrorResponse(ErrorTypeUnauthenticatedConfigurationInvalid, nil)
 	}
 
 	jwtToken, err := jwtPlugin.ExtractToken(request)
@@ -551,15 +595,17 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtIssuerInvalid, nil)
 			}
 		}
-		if jwtPlugin.expectedAudience != "" {
-			if !audienceContains(jwtToken.Payload["aud"], jwtPlugin.expectedAudience) {
-				logError(fmt.Sprintf("Token audience %q does not contain expected audience", jwtToken.Payload["aud"])).
-					withSub(sub).
-					withUrl(request.URL.String()).
-					withNetwork(jwtPlugin.remoteAddr(request)).
-					print()
-				return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtAudienceInvalid, nil)
+		if !audienceContainsAny(jwtToken.Payload["aud"], jwtPlugin.expectedAudiences) {
+			message := fmt.Sprintf("Token audience %q does not contain any of the expected audiences %q", jwtToken.Payload["aud"], jwtPlugin.expectedAudiences)
+			if jwtToken.Payload["aud"] == nil {
+				message = fmt.Sprintf("Token has no aud claim, expected one of the audiences %q", jwtPlugin.expectedAudiences)
 			}
+			logError(message).
+				withSub(sub).
+				withUrl(request.URL.String()).
+				withNetwork(jwtPlugin.remoteAddr(request)).
+				print()
+			return 0, newErrorResponse(ErrorTypeUnauthenticatedJwtAudienceInvalid, nil)
 		}
 		for _, fieldName := range jwtPlugin.payloadFields {
 			_, ok := jwtToken.Payload[fieldName]
@@ -1054,6 +1100,12 @@ func newLogEvent(level, msg string) *LogEvent {
 func (logEvent *LogEvent) print() {
 	jsonLogEvent, _ := json.Marshal(*logEvent)
 	fmt.Println(string(jsonLogEvent))
+}
+
+// printToErrorLog writes the log event through the log package, which yaegi sends to the stderr of the plugin, and Traefik logs that stderr at the ERROR level. print writes to stdout, which Traefik only logs at the DEBUG level.
+func (logEvent *LogEvent) printToErrorLog() {
+	jsonLogEvent, _ := json.Marshal(*logEvent)
+	log.Println(string(jsonLogEvent))
 }
 
 func (logEvent *LogEvent) withNetwork(network Network) *LogEvent {
